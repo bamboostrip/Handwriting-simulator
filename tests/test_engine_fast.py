@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from handwritesim.core.engine import HandwritingEngine
-from handwritesim.core.models import HandwritingParams
+from handwritesim.core.models import HandwritingParams, Paragraph
 
 _FONTS = (
     r"C:\Windows\Fonts\msyh.ttc",
@@ -102,3 +102,43 @@ def test_perturb_rotation_around_own_center() -> None:
     cout = sorted(ndimage.center_of_mass(out_mask, labels_out, range(1, n_out + 1)))
     for (iy, ix), (oy, ox) in zip(cin, cout):
         assert np.hypot(oy - iy, ox - ix) < 3
+
+
+def _para_params(tmp_path: Path, paragraphs) -> HandwritingParams:
+    params = _params(tmp_path, "占位")
+    params.paragraphs = paragraphs
+    return params
+
+
+def test_paragraph_center_and_indent(tmp_path: Path) -> None:
+    params = _para_params(tmp_path, [
+        Paragraph("标题", align="center"),
+        Paragraph("正文第一段", first_line_indent=60),
+    ])
+    image = HandwritingEngine(backend="fast").render_preview(params)
+    assert image.size == (400, 300)
+    gray = np.asarray(image.convert("L"))
+    assert gray.min() < 128  # 有前景
+
+
+def test_paragraph_multi_page(tmp_path: Path) -> None:
+    params = _para_params(tmp_path, [
+        Paragraph("标题", align="center"),
+        Paragraph("很长的一段正文。" * 80),
+    ])
+    pages = list(HandwritingEngine(backend="fast").generate(params))
+    assert len(pages) >= 2
+    for page in pages:
+        assert page.size == (400, 300)
+
+
+def test_paragraph_center_is_centered(tmp_path: Path) -> None:
+    """居中段落的每行内容应大致水平居中。"""
+    params = _para_params(tmp_path, [Paragraph("标题居中", align="center")])
+    image = HandwritingEngine(backend="fast").render_preview(params)
+    gray = np.asarray(image.convert("L"))
+    mask = gray < 128
+    cols = np.where(mask.any(axis=0))[0]
+    assert cols.size > 0
+    center = (cols.min() + cols.max()) / 2.0
+    assert abs(center - 200) < 20

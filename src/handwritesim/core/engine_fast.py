@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-from .models import HandwritingParams
+from .models import HandwritingParams, Paragraph
 
 # 4-连通邻域结构
 _CONNECTIVITY = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
@@ -99,6 +99,108 @@ def _layout_page(
     return np.asarray(page, dtype=bool), i
 
 
+def _split_text_rows(rows: np.ndarray) -> list[tuple[int, int]]:
+    """把行聚合的 bool 数组按连续段分组，返回 [start, end) 列表。"""
+    groups: list[tuple[int, int]] = []
+    start: int | None = None
+    for idx, v in enumerate(rows):
+        if v and start is None:
+            start = idx
+        elif not v and start is not None:
+            groups.append((start, idx))
+            start = None
+    if start is not None:
+        groups.append((start, len(rows)))
+    return groups
+
+
+def _center_text_lines(mask: np.ndarray) -> np.ndarray:
+    """按文本行测量非零 x 范围，逐行水平居中。"""
+    height, width = mask.shape
+    rows = np.any(mask, axis=1)
+    if not rows.any():
+        return mask
+    result = np.zeros_like(mask)
+    for y0, y1 in _split_text_rows(rows):
+        band = mask[y0:y1]
+        ys, xs = np.nonzero(band)
+        line_w = int(xs.max()) - int(xs.min()) + 1
+        if line_w >= width:
+            nx_orig = xs
+            nys = ys
+        else:
+            shift = (width - line_w) // 2 - int(xs.min())
+            nx_orig = xs + shift
+            nys = ys
+        valid = (nx_orig >= 0) & (nx_orig < width)
+        result[y0 + nys[valid], nx_orig[valid]] = True
+    return result
+
+
+def _layout_paragraph(
+    params: HandwritingParams,
+    rand: random.Random,
+    paragraph: Paragraph,
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, int]:
+    """渲染单个段落，返回裁剪后的内容 mask（bool）与占用高度。"""
+    page = Image.new("1", (width, height), 0)
+    draw = ImageDraw.Draw(page)
+    base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
+    font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+    font_size = params.font_size
+    line_spacing = float(params.line_spacing) + float(params.font_size)
+    end_chars = params.end_chars
+    start_chars = params.start_chars
+    left = params.left_margin
+    right = params.right_margin
+    text = paragraph.text
+    text_len = len(text)
+
+    def resolve_font(size: int) -> ImageFont.FreeTypeFont:
+        if size not in font_cache:
+            font_cache[size] = (
+                base_font if size == font_size else base_font.font_variant(size=size)
+            )
+        return font_cache[size]
+
+    i = 0
+    y = line_spacing - font_size
+    while i < text_len:
+        x = left + (paragraph.first_line_indent if i == 0 else 0)
+        while i < text_len:
+            ch = text[i]
+            if ch == "\n":
+                i += 1
+                break
+            if x > width - right - 2 * font_size and ch in start_chars:
+                break
+            if x > width - right - font_size and ch not in end_chars:
+                break
+            xy = (round(x), round(rand.gauss(y, params.line_spacing_sigma)))
+            font = base_font
+            if params.font_size_sigma:
+                size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
+                if size != font_size:
+                    font = resolve_font(size)
+            draw.text(xy, ch, fill=1, font=font)
+            offset = font.getbbox(ch)[2] - font.getbbox(ch)[0]
+            x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
+            i += 1
+        y += line_spacing
+
+    mask = np.asarray(page, dtype=bool)
+    if paragraph.align == "center":
+        mask = _center_text_lines(mask)
+    rows = np.any(mask, axis=1)
+    if not rows.any():
+        return np.zeros((0, width), dtype=bool), 0
+    first = int(np.argmax(rows))
+    last = int(len(rows) - 1 - np.argmax(rows[::-1]))
+    return mask[first : last + 1], last - first + 1
+
+
 # ---------------------------------------------------------------------------
 # 笔画扰动（全向量化）
 # ---------------------------------------------------------------------------
@@ -172,6 +274,8 @@ class FastEngine:
     def render_preview(self, params: HandwritingParams) -> Image.Image:
         """仅渲染第一页，用于预览。"""
         params.validate()
+        if params.paragraphs:
+            return next(self._paragraph_pages(params))
         rand = self._new_rand()
         mask, _ = _layout_page(params, rand, params.text, 0)
         background = np.asarray(Image.open(params.background_path).convert("RGB"))
@@ -182,9 +286,46 @@ class FastEngine:
         """生成手写图序列（惰性迭代），与引擎接口一致。"""
         return self.generate_pages(params)
 
+    def _paragraph_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
+        """按段落逐页渲染（段落为跨页最小单位）。"""
+        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        rand = self._new_rand()
+        height, width = background.shape[:2]
+        line_spacing = float(params.line_spacing) + float(params.font_size)
+        top, bottom = params.top_margin, params.bottom_margin
+
+        para_masks: list[tuple[np.ndarray, int]] = []
+        for para in params.paragraphs or []:
+            if not para.text:
+                continue
+            content, ph = _layout_paragraph(params, rand, para, width, height)
+            para_masks.append((content, ph))
+
+        page_canvas = np.zeros((height, width), dtype=bool)
+        used = top
+        for content, ph in para_masks:
+            if ph <= 0:
+                continue
+            if used + ph > height - bottom:
+                yield self._finalize(params, page_canvas, background)
+                page_canvas = np.zeros((height, width), dtype=bool)
+                used = top
+            ys, xs = np.nonzero(content)
+            page_canvas[used + ys, xs] = True
+            used += ph + int(round(line_spacing))
+        if page_canvas.any():
+            yield self._finalize(params, page_canvas, background)
+
+    # _finalize 使用 self._rng，与 generate_pages 共用同一随机源
+    def _finalize(self, params, mask, background):
+        return Image.fromarray(_perturb_mask(mask, params, self._rng, background), mode="RGB")
+
     def generate_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
         """逐页生成手写图（惰性迭代）。"""
         params.validate()
+        if params.paragraphs:
+            yield from self._paragraph_pages(params)
+            return
         background = np.asarray(Image.open(params.background_path).convert("RGB"))
         rand = self._new_rand()
         start = 0
