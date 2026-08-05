@@ -135,6 +135,24 @@ class Ui_Form(object):
         # 待处理文本
         self.label_text = QtWidgets.QLabel(panel)
         v.addWidget(self.label_text)
+
+        # 排版工具按钮
+        row_tools = QtWidgets.QHBoxLayout()
+        self.btn_align_left = QtWidgets.QPushButton(panel)
+        self.btn_align_left.setObjectName("btn_align_left")
+        self.btn_center = QtWidgets.QPushButton(panel)
+        self.btn_center.setObjectName("btn_center")
+        self.btn_indent = QtWidgets.QPushButton(panel)
+        self.btn_indent.setObjectName("btn_indent")
+        self.btn_import_docx = QtWidgets.QPushButton(panel)
+        self.btn_import_docx.setObjectName("btn_import_docx")
+        row_tools.addWidget(self.btn_align_left)
+        row_tools.addWidget(self.btn_center)
+        row_tools.addWidget(self.btn_indent)
+        row_tools.addWidget(self.btn_import_docx)
+        row_tools.addStretch(1)
+        v.addLayout(row_tools)
+
         self.textEdit = QtWidgets.QTextEdit(panel)
         self.textEdit.setObjectName("textEdit")
         self.textEdit.setMinimumHeight(90)
@@ -329,6 +347,10 @@ class Ui_Form(object):
         _translate = QtCore.QCoreApplication.translate
         Form.setWindowTitle(_translate("Form", "手写模拟"))
         self.label_text.setText(_translate("Form", "待处理文本"))
+        self.btn_align_left.setText("左对齐")
+        self.btn_center.setText("居中")
+        self.btn_indent.setText("首行缩进")
+        self.btn_import_docx.setText("导入 docx")
         self.textEdit.setPlaceholderText(_translate(
             "Form",
             "请输入文本内容，支持多行。\n",

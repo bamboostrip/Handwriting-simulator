@@ -58,6 +58,66 @@ class MainWindow(QMainWindow):
         ui.pushButton_6.clicked.connect(self._on_load_preset)
         # 输入文字变化时防抖自动预览
         ui.textEdit.textChanged.connect(self._preview_timer.start)
+        # 富文本排版工具
+        ui.btn_align_left.clicked.connect(lambda: self._set_block_align(0))
+        ui.btn_center.clicked.connect(lambda: self._set_block_align(1))
+        ui.btn_indent.clicked.connect(self._indent_current_block)
+        ui.btn_import_docx.clicked.connect(self._import_docx)
+
+    # ------------------------------------------------------------------
+    # 富文本排版工具
+    # ------------------------------------------------------------------
+    def _set_block_align(self, flag: int) -> None:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QTextBlockFormat
+
+        cursor = self._ui.textEdit.textCursor()
+        fmt = QTextBlockFormat()
+        fmt.setAlignment(
+            Qt.AlignmentFlag.AlignCenter if flag else Qt.AlignmentFlag.AlignLeft
+        )
+        cursor.mergeBlockFormat(fmt)
+
+    def _indent_current_block(self) -> None:
+        from PyQt6.QtGui import QTextBlockFormat
+
+        cursor = self._ui.textEdit.textCursor()
+        fmt = QTextBlockFormat()
+        fmt.setTextIndent(2 * self._int_of(self._ui.lineEdit_9, 36))
+        cursor.mergeBlockFormat(fmt)
+
+    def _set_paragraphs(self, paras) -> None:
+        """将段落列表回填为富文本。"""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QTextBlockFormat, QTextCursor
+
+        editor = self._ui.textEdit
+        editor.clear()
+        cursor = QTextCursor(editor.document())
+        for idx, para in enumerate(paras):
+            if idx:
+                cursor.insertBlock()
+            fmt = QTextBlockFormat()
+            if para.align == "center":
+                fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if para.first_line_indent:
+                fmt.setTextIndent(para.first_line_indent)
+            cursor.setBlockFormat(fmt)
+            cursor.insertText(para.text)
+        editor.setTextCursor(cursor)
+
+    def _import_docx(self) -> None:
+        from ..core.docx_io import load_paragraphs
+
+        path, _ = QFileDialog.getOpenFileName(self, "导入 docx", "", "Word 文档 (*.docx)")
+        if not path:
+            return
+        try:
+            paras = load_paragraphs(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        self._set_paragraphs(paras)
 
     # ------------------------------------------------------------------
     # 文件选择
@@ -80,6 +140,7 @@ class MainWindow(QMainWindow):
         ui = self._ui
         p = HandwritingParams()
         p.text = ui.textEdit.toPlainText()
+        p.paragraphs = self._collect_paragraphs()
         p.font_path = ui.lineEdit.text().strip()
         p.background_path = ui.lineEdit_2.text().strip()
         p.red = self._int_of(ui.lineEdit_10, 0)
@@ -100,10 +161,33 @@ class MainWindow(QMainWindow):
         p.bottom_margin = self._int_of(ui.lineEdit_4, p.bottom_margin)
         return p
 
+    def _collect_paragraphs(self):
+        """从富文本编辑器的块格式收集段落。"""
+        from PyQt6.QtCore import Qt
+
+        from ..core.models import Paragraph
+
+        doc = self._ui.textEdit.document()
+        paras: list[Paragraph] = []
+        for i in range(doc.blockCount()):
+            block = doc.findBlockByNumber(i)
+            text = block.text().strip()
+            if not text:
+                continue
+            fmt = block.blockFormat()
+            align = "center" if fmt.alignment() & Qt.AlignmentFlag.AlignCenter else "left"
+            paras.append(
+                Paragraph(text=text, align=align, first_line_indent=int(fmt.textIndent()))
+            )
+        return paras
+
     def apply_params(self, p: HandwritingParams) -> None:
         """将 HandwritingParams 回填到界面控件。"""
         ui = self._ui
-        ui.textEdit.setPlainText(p.text)
+        if p.paragraphs:
+            self._set_paragraphs(p.paragraphs)
+        else:
+            ui.textEdit.setPlainText(p.text)
         ui.lineEdit.setText(p.font_path)
         ui.lineEdit_2.setText(p.background_path)
         ui.lineEdit_10.setText(str(p.red))
