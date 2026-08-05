@@ -17,6 +17,7 @@ from PIL import Image
 from .core.engine import HandwritingEngine
 from .core.models import HandwritingParams
 from .core import presets
+from .core.docx_io import load_paragraphs
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="基于 handright 的手写体生成命令行工具",
     )
     parser.add_argument("text", nargs="?", default="", help="要处理的手写文本")
+    parser.add_argument("--docx", default="", help="导入 docx 文件（解析对齐与首行缩进）")
     parser.add_argument("--font", required=True, help="字体文件路径 (.ttf/.ttc)")
     parser.add_argument("--background", default="", help="背景图片路径（默认纯白）")
     parser.add_argument("--width", type=int, default=800, help="背景为纯白时宽度")
@@ -88,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     for key, value in explicit.items():
         setattr(params, key, value)
+
+    # 段落化：优先 docx，其次纯文本
+    if args.docx:
+        params.paragraphs = load_paragraphs(args.docx)
+    elif args.text:
+        params.paragraphs = None
 
     # 背景：未指定时生成纯白背景
     if args.background:
