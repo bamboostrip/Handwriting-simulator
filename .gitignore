@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境 & 依赖锁
+.venv/
+
+# 构建 / 打包产物
+dist/
+build/
+*.spec # 保留 specs 用 ! 排除策略，见下
+!HandWriteSim.spec
+
+# 运行输出
+output/
+
+# 开发调试校验图片
+_*.png
+
+# IDE
+.idea/
+.vscode/
