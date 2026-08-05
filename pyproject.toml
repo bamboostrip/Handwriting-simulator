@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=2.5.1",
     "pillow>=11,<13",
     "PyQt6>=6.6",
+    "python-docx>=1.2.0",
     "scipy>=1.18.0",
 ]
 
