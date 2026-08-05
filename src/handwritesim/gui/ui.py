@@ -58,6 +58,20 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
 
+class NoWheelSpinBox(QtWidgets.QSpinBox):
+    """禁用鼠标滚轮改值的整数输入框，避免与滚动面板冲突。"""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """禁用鼠标滚轮改值的浮点输入框，避免与滚动面板冲突。"""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
 class PreviewLabel(QtWidgets.QLabel):
     """预览区：保持宽高比缩放，随窗口尺寸自适应。"""
 
@@ -241,7 +255,7 @@ class Ui_Form(object):
         gl.addWidget(self.lineEdit_7, 1, 1)
         self.label_sigma_1 = QtWidgets.QLabel(self.group_layout)
         gl.addWidget(self.label_sigma_1, 1, 2)
-        self.spinBox = QtWidgets.QSpinBox(self.group_layout)
+        self.spinBox = NoWheelSpinBox(self.group_layout)
         self.spinBox.setObjectName("spinBox")
         gl.addWidget(self.spinBox, 1, 3)
         self.label_line_spacing = QtWidgets.QLabel(self.group_layout)
@@ -252,7 +266,7 @@ class Ui_Form(object):
         gl.addWidget(self.lineEdit_8, 2, 1)
         self.label_sigma_2 = QtWidgets.QLabel(self.group_layout)
         gl.addWidget(self.label_sigma_2, 2, 2)
-        self.spinBox_2 = QtWidgets.QSpinBox(self.group_layout)
+        self.spinBox_2 = NoWheelSpinBox(self.group_layout)
         self.spinBox_2.setObjectName("spinBox_2")
         gl.addWidget(self.spinBox_2, 2, 3)
         self.label_font_size = QtWidgets.QLabel(self.group_layout)
@@ -263,7 +277,7 @@ class Ui_Form(object):
         gl.addWidget(self.lineEdit_9, 3, 1)
         self.label_sigma_3 = QtWidgets.QLabel(self.group_layout)
         gl.addWidget(self.label_sigma_3, 3, 2)
-        self.spinBox_3 = QtWidgets.QSpinBox(self.group_layout)
+        self.spinBox_3 = NoWheelSpinBox(self.group_layout)
         self.spinBox_3.setObjectName("spinBox_3")
         gl.addWidget(self.spinBox_3, 3, 3)
         gl.setColumnStretch(1, 1)
@@ -274,19 +288,19 @@ class Ui_Form(object):
         gp = QtWidgets.QGridLayout(self.group_perturb)
         self.label_perturb_x = QtWidgets.QLabel(self.group_perturb)
         gp.addWidget(self.label_perturb_x, 0, 0)
-        self.spinBox_5 = QtWidgets.QSpinBox(self.group_perturb)
+        self.spinBox_5 = NoWheelSpinBox(self.group_perturb)
         self.spinBox_5.setObjectName("spinBox_5")
         self.spinBox_5.setProperty("value", 4)
         gp.addWidget(self.spinBox_5, 0, 1)
         self.label_perturb_y = QtWidgets.QLabel(self.group_perturb)
         gp.addWidget(self.label_perturb_y, 1, 0)
-        self.spinBox_4 = QtWidgets.QSpinBox(self.group_perturb)
+        self.spinBox_4 = NoWheelSpinBox(self.group_perturb)
         self.spinBox_4.setObjectName("spinBox_4")
         self.spinBox_4.setProperty("value", 4)
         gp.addWidget(self.spinBox_4, 1, 1)
         self.label_perturb_theta = QtWidgets.QLabel(self.group_perturb)
         gp.addWidget(self.label_perturb_theta, 2, 0)
-        self.doubleSpinBox_6 = QtWidgets.QDoubleSpinBox(self.group_perturb)
+        self.doubleSpinBox_6 = NoWheelDoubleSpinBox(self.group_perturb)
         self.doubleSpinBox_6.setObjectName("doubleSpinBox_6")
         self.doubleSpinBox_6.setSingleStep(0.01)
         self.doubleSpinBox_6.setProperty("value", 0.05)
