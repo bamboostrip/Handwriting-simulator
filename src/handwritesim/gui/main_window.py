@@ -34,6 +34,9 @@ class MainWindow(QMainWindow):
         self._out_dir = Path(out_dir)
         self._engine = HandwritingEngine()
         self._worker: RenderWorker | None = None
+        # 预览全部页与当前页索引
+        self._preview_pages: list = []
+        self._preview_index = 0
         # 预览分辨率上限：超过则降采样，保证实时
         self._preview_max_width = 1000
         # 输入防抖：停止输入后自动预览，实现实时效果
@@ -44,6 +47,7 @@ class MainWindow(QMainWindow):
         self._preview_timer.timeout.connect(self._on_auto_preview)
 
         self._connect_signals()
+        self._update_page_nav()
 
     # ------------------------------------------------------------------
     # 初始化
@@ -63,6 +67,9 @@ class MainWindow(QMainWindow):
         ui.btn_center.clicked.connect(lambda: self._set_block_align(1))
         ui.btn_indent.clicked.connect(self._indent_current_block)
         ui.btn_import_docx.clicked.connect(self._import_docx)
+        # 预览翻页
+        ui.btn_prev.clicked.connect(self._prev_page)
+        ui.btn_next.clicked.connect(self._next_page)
 
     # ------------------------------------------------------------------
     # 富文本排版工具
@@ -351,9 +358,40 @@ class MainWindow(QMainWindow):
         self._ui.pushButton_3.setEnabled(not busy)
         self._ui.pushButton_5.setEnabled(not busy)
 
-    def _on_preview_ready(self, pixmap) -> None:
+    def _on_preview_ready(self, pages) -> None:
+        # 预览全部页已生成，重置到第一页并刷新
+        self._preview_pages = list(pages)
+        self._preview_index = 0
+        self._show_page(0)
+
+    def _show_page(self, index: int) -> None:
+        """显示指定页并更新翻页状态。"""
+        if not self._preview_pages:
+            self._update_page_nav()
+            return
+        index = max(0, min(index, len(self._preview_pages) - 1))
+        self._preview_index = index
         # PreviewLabel 内部已按比例缩放，直接设置原图即可
-        self._ui.label_11.setPixmap(pixmap)
+        self._ui.label_11.setPixmap(self._preview_pages[index])
+        self._update_page_nav()
+
+    def _prev_page(self) -> None:
+        self._show_page(self._preview_index - 1)
+
+    def _next_page(self) -> None:
+        self._show_page(self._preview_index + 1)
+
+    def _update_page_nav(self) -> None:
+        """更新页码标签与翻页按钮可用状态。"""
+        total = len(self._preview_pages)
+        if total == 0:
+            self._ui.label_page.setText("第 1 / 1 页")
+            self._ui.btn_prev.setEnabled(False)
+            self._ui.btn_next.setEnabled(False)
+            return
+        self._ui.label_page.setText(f"第 {self._preview_index + 1} / {total} 页")
+        self._ui.btn_prev.setEnabled(self._preview_index > 0)
+        self._ui.btn_next.setEnabled(self._preview_index < total - 1)
 
     def _on_success(self, files: list[str]) -> None:
         self._set_busy(False)

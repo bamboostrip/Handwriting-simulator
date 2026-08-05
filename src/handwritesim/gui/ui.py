@@ -120,13 +120,30 @@ class Ui_Form(object):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(10)
 
-        # ---- 左侧：预览区 ----
-        self.label_11 = PreviewLabel(central)
+        # ---- 左侧：预览区 + 翻页导航 ----
+        left = QtWidgets.QWidget(central)
+        left_col = QtWidgets.QVBoxLayout(left)
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(6)
+        self.label_11 = PreviewLabel(left)
         self.label_11.setObjectName("label_11")
         self.label_11.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored
         )
-        root.addWidget(self.label_11, 1)
+        left_col.addWidget(self.label_11, 1)
+        row_nav = QtWidgets.QHBoxLayout()
+        self.btn_prev = QtWidgets.QPushButton(left)
+        self.btn_prev.setObjectName("btn_prev")
+        row_nav.addWidget(self.btn_prev)
+        self.label_page = QtWidgets.QLabel(left)
+        self.label_page.setObjectName("label_page")
+        self.label_page.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        row_nav.addWidget(self.label_page, 1)
+        self.btn_next = QtWidgets.QPushButton(left)
+        self.btn_next.setObjectName("btn_next")
+        row_nav.addWidget(self.btn_next)
+        left_col.addLayout(row_nav)
+        root.addWidget(left, 1)
 
         # ---- 右侧：参数面板（可滚动） ----
         scroll = QtWidgets.QScrollArea(central)
@@ -360,6 +377,9 @@ class Ui_Form(object):
     def retranslateUi(self, Form):
         _translate = QtCore.QCoreApplication.translate
         Form.setWindowTitle(_translate("Form", "手写模拟"))
+        self.btn_prev.setText("◀ 上一页")
+        self.btn_next.setText("下一页 ▶")
+        self.label_page.setText("第 1 / 1 页")
         self.label_text.setText(_translate("Form", "待处理文本"))
         self.btn_align_left.setText("左对齐")
         self.btn_center.setText("居中")

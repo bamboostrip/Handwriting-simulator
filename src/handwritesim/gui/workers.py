@@ -11,7 +11,7 @@ from typing import Literal
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from PIL import Image, ImageQt
+from PIL import ImageQt
 
 from ..core.engine import HandwritingEngine
 from ..core.models import HandwritingParams
@@ -22,7 +22,7 @@ Mode = Literal["preview", "export"]
 class RenderWorker(QThread):
     """在后台线程执行一次渲染或导出。"""
 
-    preview_ready = pyqtSignal(object)   # QPixmap
+    preview_ready = pyqtSignal(object)   # list[QPixmap]（预览全部页）
     succeeded = pyqtSignal(list)         # list[Path]（导出）或空（预览）
     failed = pyqtSignal(str)             # 错误信息
 
@@ -43,9 +43,11 @@ class RenderWorker(QThread):
     def run(self) -> None:  # noqa: D102
         try:
             if self._mode == "preview":
-                image: Image.Image = self._engine.render_preview(self._params)
-                pixmap = ImageQt.toqpixmap(image.convert("RGBA"))
-                self.preview_ready.emit(pixmap)
+                pixmaps = [
+                    ImageQt.toqpixmap(im.convert("RGBA"))
+                    for im in self._engine.generate(self._params)
+                ]
+                self.preview_ready.emit(pixmaps)
                 self.succeeded.emit([])
             else:
                 files = self._engine.save_all(self._params, self._out_dir)
