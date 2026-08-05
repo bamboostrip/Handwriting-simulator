@@ -30,6 +30,22 @@ _CONNECTIVITY = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 # ---------------------------------------------------------------------------
 # 排版
 # ---------------------------------------------------------------------------
+def _char_offset(
+    offset_cache: dict[tuple[int, int], int],
+    size: int,
+    ch: str,
+    font: ImageFont.FreeTypeFont,
+) -> int:
+    """取字符横向宽度，按 (字号, 字符) 缓存免去重复 getbbox。"""
+    key = (size, ch)
+    cached = offset_cache.get(key)
+    if cached is not None:
+        return cached
+    offset = font.getbbox(ch)[2] - font.getbbox(ch)[0]
+    offset_cache[key] = offset
+    return offset
+
+
 def _layout_page(
     params: HandwritingParams,
     rand: random.Random,
@@ -46,8 +62,9 @@ def _layout_page(
     page = Image.new("1", (width, height), 0)
     draw = ImageDraw.Draw(page)
     base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
-    # 按字号缓存字体，避免每次扰动都重建字体对象
+    # 按字号缓存字体与字符宽度，避免每次扰动都重建字体/重新测量
     font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+    offset_cache: dict[tuple[int, int], int] = {}
 
     font_size = params.font_size
     # 行距含字高；用浮点加法而非 total_line_spacing 属性（其内部 int()
@@ -58,6 +75,8 @@ def _layout_page(
     top, bottom = params.top_margin, params.bottom_margin
     left, right = params.left_margin, params.right_margin
     text_len = len(text)
+
+    font_size_int = int(font_size)
 
     def resolve_font(size: int) -> ImageFont.FreeTypeFont:
         if size not in font_cache:
@@ -84,12 +103,13 @@ def _layout_page(
 
             xy = (round(x), round(rand.gauss(y, params.line_spacing_sigma)))
             font = base_font
+            size = font_size_int
             if params.font_size_sigma:
                 size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
                 if size != font_size:
                     font = resolve_font(size)
             draw.text(xy, ch, fill=1, font=font)
-            offset = font.getbbox(ch)[2] - font.getbbox(ch)[0]
+            offset = _char_offset(offset_cache, size, ch, font)
             x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
 
             i += 1
@@ -158,6 +178,9 @@ def _layout_paragraph(
     text = paragraph.text
     text_len = len(text)
 
+    # 按字号缓存字符宽度，避免重复 getbbox
+    offset_cache: dict[tuple[int, int], int] = {}
+
     def resolve_font(size: int) -> ImageFont.FreeTypeFont:
         if size not in font_cache:
             font_cache[size] = (
@@ -180,12 +203,13 @@ def _layout_paragraph(
                 break
             xy = (round(x), round(rand.gauss(y, params.line_spacing_sigma)))
             font = base_font
+            size = int(font_size)
             if params.font_size_sigma:
                 size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
                 if size != font_size:
                     font = resolve_font(size)
             draw.text(xy, ch, fill=1, font=font)
-            offset = font.getbbox(ch)[2] - font.getbbox(ch)[0]
+            offset = _char_offset(offset_cache, size, ch, font)
             x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
             i += 1
         y += line_spacing
