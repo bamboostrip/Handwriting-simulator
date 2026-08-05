@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from handwritesim.core.engine import HandwritingEngine
-from handwritesim.core.models import HandwritingParams
+from handwritesim.core.models import HandwritingParams, Paragraph
 
 _FONTS = (
     r"C:\Windows\Fonts\msyh.ttc",
@@ -72,3 +72,14 @@ def test_validate_missing_font(tmp_path: Path) -> None:
     params = HandwritingParams(text="x", font_path=str(tmp_path / "nope.ttf"), background_path=str(bg))
     with pytest.raises(HandwritingParams.ValidationError, match="字体"):
         params.validate()
+
+
+def test_paragraphs_roundtrip_dict() -> None:
+    p = Paragraph("标题", align="center", first_line_indent=60)
+    params = HandwritingParams(paragraphs=[p])
+    restored = HandwritingParams.from_dict(params.to_dict())
+    assert restored.paragraphs == [p]
+
+
+def test_paragraphs_default_none() -> None:
+    assert HandwritingParams().paragraphs is None

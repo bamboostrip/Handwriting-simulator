@@ -12,6 +12,15 @@ from typing import Any, Iterable
 
 
 @dataclass
+class Paragraph:
+    """单个段落的排版信息。"""
+
+    text: str = ""
+    align: str = "left"          # "left" | "center"
+    first_line_indent: int = 0   # 首行缩进（像素）
+
+
+@dataclass
 class HandwritingParams:
     """一次手写模拟的完整参数。"""
 
@@ -19,6 +28,7 @@ class HandwritingParams:
     font_path: str = ""
     background_path: str = ""
     text: str = ""
+    paragraphs: list[Paragraph] | None = None  # 非空时启用段落渲染
 
     # ---- 字体颜色 (RGB) ----
     red: int = 0
@@ -127,7 +137,13 @@ class HandwritingParams:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HandwritingParams":
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        clean: dict[str, Any] = {k: v for k, v in data.items() if k in known}
+        if isinstance(clean.get("paragraphs"), list):
+            clean["paragraphs"] = [
+                p if isinstance(p, Paragraph) else Paragraph(**p)
+                for p in clean["paragraphs"]
+            ]
+        return cls(**clean)
 
     def __str__(self) -> str:  # 便于日志
         return ", ".join(f"{f.name}={getattr(self, f.name)}" for f in fields(self))
