@@ -142,3 +142,23 @@ def test_paragraph_center_is_centered(tmp_path: Path) -> None:
     assert cols.size > 0
     center = (cols.min() + cols.max()) / 2.0
     assert abs(center - 200) < 20
+
+
+def test_paragraph_float_margins_preview(tmp_path: Path) -> None:
+    """预览降采样后边距为浮点，段落渲染不应报索引错误。
+
+    回归：GUI 预览降采样把 top_margin 缩放为 float，_paragraph_pages
+    用浮点 used 做 numpy 索引导致 IndexError。
+    """
+    params = _params(tmp_path, "占位")
+    params.paragraphs = [Paragraph("标题", align="center"), Paragraph("正文内容。")]
+    params.top_margin = 25.0
+    params.bottom_margin = 25.0
+    params.left_margin = 25.0
+    params.right_margin = 25.0
+    params.font_size = 30.0
+    params.line_spacing = 40.0
+    image = HandwritingEngine(backend="fast").render_preview(params)
+    assert image.size == (400, 300)
+    gray = np.asarray(image.convert("L"))
+    assert gray.min() < 128

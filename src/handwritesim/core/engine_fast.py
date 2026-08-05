@@ -316,7 +316,8 @@ class FastEngine:
         rand = self._new_rand()
         height, width = background.shape[:2]
         line_spacing = float(params.line_spacing) + float(params.font_size)
-        top, bottom = params.top_margin, params.bottom_margin
+        # 预览降采样会使边距为浮点，这里取整以保证 numpy 索引为整数
+        top, bottom = int(params.top_margin), int(params.bottom_margin)
 
         para_masks: list[tuple[np.ndarray, int]] = []
         for para in params.paragraphs or []:
