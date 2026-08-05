@@ -83,3 +83,15 @@ def test_paragraphs_roundtrip_dict() -> None:
 
 def test_paragraphs_default_none() -> None:
     assert HandwritingParams().paragraphs is None
+
+
+def test_validate_allows_paragraphs_without_text(tmp_path: Path) -> None:
+    bg = tmp_path / "bg.png"
+    Image.new("RGB", (10, 10), "white").save(bg)
+    params = HandwritingParams(
+        text="",
+        paragraphs=[Paragraph("标题", align="center")],
+        font_path=_font(),
+        background_path=str(bg),
+    )
+    params.validate()  # 段落模式下 text 可为空

@@ -77,7 +77,7 @@ class HandwritingParams:
 
     def validate(self, *, require_text: bool = True) -> None:
         """校验参数是否完整、合法，失败抛出 ValidationError。"""
-        if require_text and not self.text.strip():
+        if require_text and not self.text.strip() and not self.paragraphs:
             raise self.ValidationError("未输入要处理的文字")
         if not self.font_path:
             raise self.ValidationError("未指定字体文件")
