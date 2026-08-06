@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         # 预览翻页
         ui.btn_prev.clicked.connect(self._prev_page)
         ui.btn_next.clicked.connect(self._next_page)
+        ui.btn_preview_bg.clicked.connect(self._toggle_preview_bg)
 
     # ------------------------------------------------------------------
     # 富文本排版工具
@@ -404,6 +405,19 @@ class MainWindow(QMainWindow):
         # PreviewLabel 内部已按比例缩放，直接设置原图即可
         self._ui.label_11.setPixmap(self._preview_pages[index])
         self._update_page_nav()
+
+    # 预览底色候选：一浅一深差异大，背景图撞色时可切换区分
+    _PREVIEW_BG_COLORS = ("#c8d0ca", "#565b56")
+
+    def _toggle_preview_bg(self) -> None:
+        """循环切换预览区底色，避免背景图与底色撞色时边界不可辨。"""
+        idx = (getattr(self, "_preview_bg_idx", 0) + 1) % len(self._PREVIEW_BG_COLORS)
+        self._preview_bg_idx = idx
+        color = self._PREVIEW_BG_COLORS[idx]
+        self._ui.label_11.setStyleSheet(
+            f"PreviewLabel {{ background: {color};"
+            " border: 1px solid #d3ded6; border-radius: 6px; }"
+        )
 
     def _prev_page(self) -> None:
         self._show_page(self._preview_index - 1)
