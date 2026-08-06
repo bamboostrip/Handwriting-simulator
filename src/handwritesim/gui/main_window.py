@@ -62,8 +62,6 @@ class MainWindow(QMainWindow):
         ui.pushButton_5.clicked.connect(self._on_export)
         ui.pushButton_4.clicked.connect(self._on_save_preset)
         ui.pushButton_6.clicked.connect(self._on_load_preset)
-        # 输入文字变化时防抖自动预览
-        ui.textEdit.textChanged.connect(self._preview_timer.start)
         # 富文本排版工具
         ui.btn_align_left.clicked.connect(lambda: self._set_block_align(0))
         ui.btn_center.clicked.connect(lambda: self._set_block_align(1))
@@ -74,6 +72,41 @@ class MainWindow(QMainWindow):
         ui.btn_prev.clicked.connect(self._prev_page)
         ui.btn_next.clicked.connect(self._next_page)
         ui.btn_preview_bg.clicked.connect(self._toggle_preview_bg)
+        self._connect_auto_preview()
+
+    def _connect_auto_preview(self) -> None:
+        """文本或任意参数变化时防抖自动预览（参数不完整时静默跳过）。
+
+        覆盖文本编辑、字体/背景路径、文字颜色、排版参数、笔画扰动、
+        边距与边界提示开关，与手动「预览」按钮效果一致。
+        """
+        ui = self._ui
+        start = lambda *_: self._preview_timer.start()
+        for w in (
+            ui.textEdit,       # 待处理文本
+            ui.lineEdit,       # 字体路径
+            ui.lineEdit_2,     # 背景路径
+            ui.lineEdit_10,    # 文字颜色
+            ui.lineEdit_7,     # 字水平间距
+            ui.lineEdit_8,     # 字竖直间距
+            ui.lineEdit_9,     # 字体大小
+            ui.lineEdit_3,     # 上边距
+            ui.lineEdit_4,     # 下边距
+            ui.lineEdit_5,     # 左边距
+            ui.lineEdit_6,     # 右边距
+            ui.lineEdit_13,    # 边界提示颜色
+        ):
+            w.textChanged.connect(start)
+        for w in (
+            ui.spinBox,        # 字间距 σ
+            ui.spinBox_2,      # 行距 σ
+            ui.spinBox_3,      # 字号 σ
+            ui.spinBox_5,      # 笔画水平位移
+            ui.spinBox_4,      # 笔画竖直位移
+        ):
+            w.valueChanged.connect(start)
+        ui.doubleSpinBox_6.valueChanged.connect(start)  # 笔画旋转
+        ui.checkBox_bounds.toggled.connect(start)       # 边界提示开关
 
     # ------------------------------------------------------------------
     # 富文本排版工具
@@ -90,6 +123,8 @@ class MainWindow(QMainWindow):
             Qt.AlignmentFlag.AlignRight,
         )[flag])
         cursor.mergeBlockFormat(fmt)
+        # 段落格式变化后自动预览
+        self._preview_timer.start()
 
     def _indent_current_block(self) -> None:
         from PyQt6.QtGui import QTextBlockFormat
@@ -98,6 +133,8 @@ class MainWindow(QMainWindow):
         fmt = QTextBlockFormat()
         fmt.setTextIndent(2 * self._int_of(self._ui.lineEdit_9, 36))
         cursor.mergeBlockFormat(fmt)
+        # 段落格式变化后自动预览
+        self._preview_timer.start()
 
     def _set_paragraphs(self, paras) -> None:
         """将段落列表回填为富文本。"""
