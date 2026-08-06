@@ -198,6 +198,36 @@ def test_paragraph_empty_line_matches_plain(tmp_path: Path) -> None:
     assert np.array_equal(a, b)
 
 
+def test_paragraph_right_aligned(tmp_path: Path) -> None:
+    """右对齐段落的每行右缘应贴近 width - right_margin。"""
+    params = _para_params(tmp_path, [
+        Paragraph("右对齐落款行", align="right"),
+        Paragraph("汇报人：张三", align="right"),
+    ])
+    image = HandwritingEngine(backend="fast").render_preview(params)
+    gray = np.asarray(image.convert("L"))
+    mask = gray < 128
+    rows = np.where(mask.any(axis=1))[0]
+    assert rows.size > 0
+    # 逐行检查右缘
+    for y0, y1 in ((rows.min(), rows.max()),):
+        band = mask[y0:y1 + 1]
+        row_groups: list[tuple[int, int]] = []
+        r = band.any(axis=1)
+        s = None
+        for i, v in enumerate(r):
+            if v and s is None:
+                s = i
+            elif not v and s is not None:
+                row_groups.append((s, i))
+                s = None
+        if s is not None:
+            row_groups.append((s, len(r)))
+        for g0, g1 in row_groups:
+            cols = np.where(band[g0:g1].any(axis=0))[0]
+            assert abs(int(cols.max()) - (400 - 30)) < 15
+
+
 def test_paragraph_float_margins_preview(tmp_path: Path) -> None:
     """预览降采样后边距为浮点，段落渲染不应报索引错误。
 

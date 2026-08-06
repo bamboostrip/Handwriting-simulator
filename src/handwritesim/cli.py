@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # 段落化：优先 docx，其次纯文本
     if args.docx:
-        params.paragraphs = load_paragraphs(args.docx)
+        params.paragraphs = load_paragraphs(args.docx, params.font_size)
     elif args.text:
         params.paragraphs = None
 

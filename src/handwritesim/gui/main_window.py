@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         # 富文本排版工具
         ui.btn_align_left.clicked.connect(lambda: self._set_block_align(0))
         ui.btn_center.clicked.connect(lambda: self._set_block_align(1))
+        ui.btn_align_right.clicked.connect(lambda: self._set_block_align(2))
         ui.btn_indent.clicked.connect(self._indent_current_block)
         ui.btn_import_docx.clicked.connect(self._import_docx)
         # 预览翻页
@@ -82,9 +83,11 @@ class MainWindow(QMainWindow):
 
         cursor = self._ui.textEdit.textCursor()
         fmt = QTextBlockFormat()
-        fmt.setAlignment(
-            Qt.AlignmentFlag.AlignCenter if flag else Qt.AlignmentFlag.AlignLeft
-        )
+        fmt.setAlignment((
+            Qt.AlignmentFlag.AlignLeft,
+            Qt.AlignmentFlag.AlignCenter,
+            Qt.AlignmentFlag.AlignRight,
+        )[flag])
         cursor.mergeBlockFormat(fmt)
 
     def _indent_current_block(self) -> None:
@@ -109,6 +112,8 @@ class MainWindow(QMainWindow):
             fmt = QTextBlockFormat()
             if para.align == "center":
                 fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            elif para.align == "right":
+                fmt.setAlignment(Qt.AlignmentFlag.AlignRight)
             if para.first_line_indent:
                 fmt.setTextIndent(para.first_line_indent)
             cursor.setBlockFormat(fmt)
@@ -122,7 +127,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            paras = load_paragraphs(path)
+            paras = load_paragraphs(path, self._int_of(self._ui.lineEdit_9, 36))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
@@ -189,7 +194,13 @@ class MainWindow(QMainWindow):
             if text:
                 has_text = True
             fmt = block.blockFormat()
-            align = "center" if fmt.alignment() & Qt.AlignmentFlag.AlignCenter else "left"
+            alignment = fmt.alignment()
+            if alignment & Qt.AlignmentFlag.AlignCenter:
+                align = "center"
+            elif alignment & Qt.AlignmentFlag.AlignRight:
+                align = "right"
+            else:
+                align = "left"
             paras.append(
                 Paragraph(text=text, align=align, first_line_indent=int(fmt.textIndent()))
             )
@@ -256,7 +267,8 @@ class MainWindow(QMainWindow):
         except HandwritingParams.ValidationError:
             return
         self._auto = True
-        self._start_worker(params, "preview")
+        # 连续输入时上一次渲染可能仍在进行，静默跳过本次，避免弹窗打断输入
+        self._start_worker(params, "preview", quiet=True)
 
     def _on_export(self) -> None:
         params = self.collect_params()
@@ -341,9 +353,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 后台任务
     # ------------------------------------------------------------------
-    def _start_worker(self, params: HandwritingParams, mode: str) -> None:
+    def _start_worker(self, params: HandwritingParams, mode: str, quiet: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
-            QMessageBox.information(self, "提示", "任务进行中，请稍候")
+            if not quiet:
+                QMessageBox.information(self, "提示", "任务进行中，请稍候")
             return
         self._set_busy(True)
         worker = RenderWorker(self._engine, params, mode, self._out_dir)

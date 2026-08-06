@@ -157,6 +157,23 @@ def _center_text_lines(mask: np.ndarray) -> np.ndarray:
     return result
 
 
+def _right_text_lines(mask: np.ndarray, right_x: int) -> np.ndarray:
+    """按文本行测量非零 x 范围，逐行右对齐到 right_x。"""
+    height, width = mask.shape
+    rows = np.any(mask, axis=1)
+    if not rows.any():
+        return mask
+    result = np.zeros_like(mask)
+    for y0, y1 in _split_text_rows(rows):
+        band = mask[y0:y1]
+        ys, xs = np.nonzero(band)
+        shift = (right_x - 1) - int(xs.max())
+        nx = xs + shift
+        valid = (nx >= 0) & (nx < width)
+        result[y0 + ys[valid], nx[valid]] = True
+    return result
+
+
 def _layout_paragraph(
     params: HandwritingParams,
     rand: random.Random,
@@ -236,6 +253,8 @@ def _layout_paragraph(
     mask = np.asarray(page, dtype=bool)
     if paragraph.align == "center":
         mask = _center_text_lines(mask)
+    elif paragraph.align == "right":
+        mask = _right_text_lines(mask, int(round(width - right)))
 
     # 按行提取墨迹：先用连通行带分出每行墨迹组（行间距大于墨迹高度时
     # 每行自成一带），再按顺序归属到各非空行，避免固定中点切分裁掉墨迹。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Pt
 
 from handwritesim.core.docx_io import load_paragraphs
@@ -29,3 +30,36 @@ def test_load_paragraphs(tmp_path):
     assert paras[1].align == "left"
     assert paras[1].first_line_indent > 0
     assert isinstance(paras[1], Paragraph)
+
+
+def test_right_align(tmp_path):
+    doc = Document()
+    p = doc.add_paragraph("汇报人：张三")
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    path = tmp_path / "right.docx"
+    doc.save(path)
+    paras = load_paragraphs(path)
+    assert paras[0].align == "right"
+
+
+def test_first_line_chars_indent(tmp_path):
+    """中文 Word 的“首行缩进 2 字符”写 firstLineChars，应按字号换算。"""
+    doc = Document()
+    p = doc.add_paragraph("现将有关事项通知如下。")
+    pPr = p._p.get_or_add_pPr()
+    pPr.append(pPr.makeelement(qn("w:ind"), {qn("w:firstLineChars"): "200"}))
+    path = tmp_path / "chars.docx"
+    doc.save(path)
+    paras = load_paragraphs(path, font_size=140)
+    assert paras[0].first_line_indent == 280
+
+
+def test_style_inherited_indent(tmp_path):
+    """直接格式缺失时应沿样式链继承首行缩进。"""
+    doc = Document()
+    doc.styles["Normal"].paragraph_format.first_line_indent = Pt(24)
+    doc.add_paragraph("继承缩进的正文。")
+    path = tmp_path / "style.docx"
+    doc.save(path)
+    paras = load_paragraphs(path)
+    assert paras[0].first_line_indent > 0
