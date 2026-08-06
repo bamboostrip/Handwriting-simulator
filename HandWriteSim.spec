@@ -5,37 +5,43 @@
 无需携带 _internal 等附加文件夹，单文件即可拷贝分发。
 UI 资源（ui/3d.ico）一并打入，窗口图标直接嵌入 exe。
 
-体积优化：excludes 排除 PyInstaller hook 默认全量收集的未使用模块
-（scipy 仅用 ndimage、PyQt6 仅用 QtCore/QtGui/QtWidgets）；
-Qt 插件与 opengl32sw 软件渲染器显式收集，保证平台插件不丢失。
+体积优化：
+- excludes 排除 PyInstaller hook 全量收集的未使用模块（scipy 仅用 ndimage
+  及其依赖链 special/linalg；PyQt6 仅用 QtCore/QtGui/QtWidgets）
+- Qt 平台插件按需收集，imageformats 只保留 png/jpeg/ico
+- 剔除未使用的 Qt6Pdf/Qt6Svg DLL 与 opengl32sw 软件渲染器
+  （QWidgets 光栅渲染不需要 OpenGL）
 """
 import os
 
 import PyQt6
+from PyInstaller.building.datastruct import TOC
 from PyInstaller.utils.hooks import collect_submodules
 
 # Qt6 根目录（spec 由 PyInstaller 在项目 venv 中执行，PyQt6 已安装）
 _qt_root = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6")
 
-# UI 资源 + Qt 运行时插件（platforms/qwindows 等，排除未用 Qt 模块后
-# hook 不再自动收集插件，必须显式加入，否则 GUI 无法启动）
+# UI 资源 + Qt 运行时插件（排除未用 Qt 模块后 hook 不再自动收集插件，
+# 必须显式加入，否则 GUI 无法启动）
 datas = [("ui", "ui")]
 for _sub in (
-    "plugins/platforms",
-    "plugins/styles",
-    "plugins/imageformats",
-    "plugins/iconengines",
-    "plugins/generic",
-    "plugins/tls",
+    "plugins/platforms",   # qwindows 窗口平台（必需）
+    "plugins/styles",      # qmodernwindowsstyle 界面样式
+    "plugins/generic",     # 触摸支持
+    "plugins/tls",         # 网络 TLS 后端
 ):
     _src = os.path.join(_qt_root, _sub)
     if os.path.isdir(_src):
         datas.append((_src, os.path.join("PyQt6", "Qt6", _sub)))
 
-# Qt 软件渲染器：无 GPU 环境时 Qt6Gui 依赖它做 OpenGL 回退
-_sw_renderer = os.path.join(_qt_root, "bin", "opengl32sw.dll")
-if os.path.isfile(_sw_renderer):
-    datas.append((_sw_renderer, os.path.join("PyQt6", "Qt6", "bin")))
+# imageformats 按需收集：qpng（预览）、qjpeg（JPEG 背景）、qico（窗口图标），
+# 其余（gif/webp/tiff/pdf/svg 等）体积大且用不到，不收集
+_img_dir = os.path.join(_qt_root, "plugins", "imageformats")
+if os.path.isdir(_img_dir):
+    for _name in ("qpng.dll", "qjpeg.dll", "qico.dll"):
+        _file = os.path.join(_img_dir, _name)
+        if os.path.isfile(_file):
+            datas.append((_file, os.path.join("PyQt6", "Qt6", "plugins", "imageformats")))
 
 # 未使用模块排除清单：
 # - scipy 仅使用 ndimage，排除其余子模块
@@ -49,6 +55,7 @@ _excludes = [
     "scipy.spatial", "scipy.fft", "scipy.integrate", "scipy.interpolate",
     "scipy.signal", "scipy.sparse", "scipy.cluster", "scipy.constants",
     "scipy.io", "scipy.misc", "scipy.odr", "scipy.datasets",
+    "PIL._avif",  # AVIF 格式支持，项目不需要
     "PyQt6.QtOpenGL", "PyQt6.QtOpenGLWidgets", "PyQt6.QtPrintSupport",
     "PyQt6.QtMultimedia", "PyQt6.QtMultimediaWidgets", "PyQt6.QtSql",
     "PyQt6.QtTest", "PyQt6.QtXml", "PyQt6.QtQml", "PyQt6.QtQuick",
@@ -75,6 +82,38 @@ a = Analysis(
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     noarchive=False,
+)
+
+# 从收集结果中剔除未使用的 Qt DLL（Qt6Gui/Qt6Widgets 不依赖它们）：
+# - Qt6Pdf（PDF 模块）、Qt6Svg（SVG 模块）
+# - opengl32sw（Qt 软件 OpenGL 渲染器，QWidgets 光栅渲染不需要）
+# - Qt6Network（本应用不用网络；若 Qt6Gui 链接它则启动会失败，已实测可移除）
+a.binaries = TOC(
+    (name, path, typecode)
+    for name, path, typecode in a.binaries
+    if os.path.basename(name)
+    not in ("Qt6Pdf.dll", "Qt6Svg.dll", "opengl32sw.dll", "Qt6Network.dll",
+            "libssl-3-x64.dll", "libcrypto-3-x64.dll")
+)
+
+# hook 默认全量收集 Qt 插件（imageformats 十余个、iconengines 等），
+# 按需过滤：iconengines 全删（依赖已移除的 Qt6Svg），
+# imageformats 只留 qjpeg/qico（PNG 为 Qt 内置格式无需插件）
+def _keep_qt_plugins(name: str) -> bool:
+    """按需保留 Qt 插件，返回 False 表示剔除。"""
+    if "plugins" not in name:
+        return True
+    if "iconengines" in name:
+        return False
+    if "imageformats" in name:
+        return os.path.basename(name) in ("qjpeg.dll", "qico.dll")
+    return True
+
+
+a.datas = TOC(
+    (name, path, typecode)
+    for name, path, typecode in a.datas
+    if _keep_qt_plugins(name)
 )
 
 pyz = PYZ(a.pure)

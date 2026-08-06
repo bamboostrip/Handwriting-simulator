@@ -284,9 +284,9 @@ uv run pytest tests/test_presets.py -v
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-- 产物：`dist/HandWriteSim.exe`（**单文件**，约 61 MB）
+- 产物：`dist/HandWriteSim.exe`（**单文件**，约 49 MB）
 - 拷贝单个 exe 到任意位置即可运行，无需携带任何附加文件夹
-- 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式）：排除未使用的 scipy/PyQt6 模块瘦身（保留 scipy.ndimage 及其依赖链 special/linalg），UI 资源（`ui/`）与 Qt 平台插件一并打入，窗口图标为 `ui/3d.ico`
+- 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式）：排除未使用的 scipy/PyQt6 模块瘦身（保留 scipy.ndimage 及其依赖链 special/linalg），Qt 插件按需收集（仅 png/jpeg/ico），剔除 Qt6Pdf/Qt6Svg/Qt6Network/opengl32sw 等未用组件，UI 资源（`ui/`）与 Qt 平台插件一并打入，窗口图标为 `ui/3d.ico`
 - 首次启动时 exe 会自解压到系统临时目录，启动稍慢属正常现象
 - 首次运行若被杀毒软件（如 Windows Defender）实时扫描拦截，等待扫描完成或将其加入白名单后即可正常启动（PyInstaller 单文件程序的共性现象，并非程序问题）
 
