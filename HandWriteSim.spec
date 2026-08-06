@@ -1,12 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置（onedir 模式，便于分发）。
+"""PyInstaller 打包配置（onefile 单文件模式，便于分发）。
 
-UI 资源（ui/3d.ico）与输出目录一并打包，保证 exe 运行时可加载窗口图标。
-界面文字与背景已全部由 Qt 控件绘制，不再依赖背景图片。
+打包产物为单个 HandWriteSim.exe，运行时自解压到临时目录，
+无需携带 _internal 等附加文件夹，单文件即可拷贝分发。
+UI 资源（ui/3d.ico）一并打入，窗口图标直接嵌入 exe。
 """
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = [("ui", "ui"), ("output", "output")]
+datas = [("ui", "ui")]
 
 a = Analysis(
     ["main.py"],
@@ -28,8 +29,10 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="HandWriteSim",
     debug=False,
     bootloader_ignore_signals=False,
@@ -38,15 +41,4 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon="ui/3d.ico",
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="HandWriteSim",
 )

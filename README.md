@@ -284,9 +284,10 @@ uv run pytest tests/test_presets.py -v
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-- 产物：`dist/HandWriteSim/HandWriteSim.exe`（onedir 目录结构）
-- 分发时需携带整个 `dist/HandWriteSim/` 文件夹
-- 打包配置见 `HandWriteSim.spec`：UI 资源（`ui/`）与输出目录一并打包，窗口图标为 `ui/3d.ico`
+- 产物：`dist/HandWriteSim.exe`（**单文件**，约 73 MB）
+- 拷贝单个 exe 到任意位置即可运行，无需携带任何附加文件夹
+- 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式）：UI 资源（`ui/`）一并打入，窗口图标为 `ui/3d.ico`
+- 首次启动时 exe 会自解压到系统临时目录，启动稍慢属正常现象
 
 ## 常见问题
 
