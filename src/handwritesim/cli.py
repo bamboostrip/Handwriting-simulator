@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         presets.save(args.save_preset, params)
 
     if not args.docx and not args.text:
-        print("错误：未提供文本或 docx（可用位置参数、--docx 或 --preset 中的 text）", file=sys.stderr)
+        print("错误：未提供文本或 docx（可用位置参数或 --docx）", file=sys.stderr)
         return 2
 
     engine = HandwritingEngine()

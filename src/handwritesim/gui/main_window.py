@@ -158,9 +158,7 @@ class MainWindow(QMainWindow):
         p.paragraphs = self._collect_paragraphs()
         p.font_path = ui.lineEdit.text().strip()
         p.background_path = ui.lineEdit_2.text().strip()
-        p.red = self._int_of(ui.lineEdit_10, 0)
-        p.green = self._int_of(ui.lineEdit_11, 0)
-        p.blue = self._int_of(ui.lineEdit_12, 0)
+        p.red, p.green, p.blue = self._color_of(ui.lineEdit_10, (0, 0, 0))
         p.word_spacing = self._int_of(ui.lineEdit_7, p.word_spacing)
         p.word_spacing_sigma = self._int_of(ui.spinBox, p.word_spacing_sigma)
         p.line_spacing = self._int_of(ui.lineEdit_8, p.line_spacing)
@@ -212,15 +210,14 @@ class MainWindow(QMainWindow):
     def apply_params(self, p: HandwritingParams) -> None:
         """将 HandwritingParams 回填到界面控件。"""
         ui = self._ui
+        # 预设不含文本内容：仅当预设自带文本时才回填，否则保留当前输入
         if p.paragraphs:
             self._set_paragraphs(p.paragraphs)
-        else:
+        elif p.text:
             ui.textEdit.setPlainText(p.text)
         ui.lineEdit.setText(p.font_path)
         ui.lineEdit_2.setText(p.background_path)
-        ui.lineEdit_10.setText(str(p.red))
-        ui.lineEdit_11.setText(str(p.green))
-        ui.lineEdit_12.setText(str(p.blue))
+        ui.lineEdit_10.setText(p.color)
         ui.lineEdit_7.setText(str(p.word_spacing))
         ui.spinBox.setValue(int(p.word_spacing_sigma))
         ui.lineEdit_8.setText(str(p.line_spacing))
@@ -248,6 +245,16 @@ class MainWindow(QMainWindow):
             return float(widget.text().strip())
         except (ValueError, AttributeError):
             return float(default)
+
+    @staticmethod
+    def _color_of(widget, default: tuple[int, int, int]) -> tuple[int, int, int]:
+        """解析 #RRGGBB 颜色输入；格式非法时回退到默认三元组。"""
+        from ..core.models import parse_color
+
+        try:
+            return parse_color(widget.text())
+        except (ValueError, AttributeError):
+            return default
 
     # ------------------------------------------------------------------
     # 按钮事件
@@ -365,11 +372,7 @@ class MainWindow(QMainWindow):
         bounds = None
         ui = self._ui
         if mode == "preview" and ui.checkBox_bounds.isChecked():
-            bounds = (
-                self._int_of(ui.lineEdit_13, 76),
-                self._int_of(ui.lineEdit_14, 166),
-                self._int_of(ui.lineEdit_15, 166),
-            )
+            bounds = self._color_of(ui.lineEdit_13, (76, 166, 166))
         worker = RenderWorker(self._engine, params, mode, self._out_dir, bounds=bounds)
         worker.succeeded.connect(self._on_success)
         worker.preview_ready.connect(self._on_preview_ready)

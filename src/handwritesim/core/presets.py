@@ -14,10 +14,13 @@ from .models import HandwritingParams
 
 
 def save_json(params: HandwritingParams, path: str | Path) -> None:
-    """将参数保存为结构化 JSON 预设文件。"""
+    """将参数保存为结构化 JSON 预设文件。
+
+    仅保存排版参数（不含文本内容），颜色以 #RRGGBB 十六进制保存。
+    """
     data: dict[str, Any] = {
-        "version": 1,
-        "params": params.to_dict(),
+        "version": 2,
+        "params": params.to_preset_dict(),
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)

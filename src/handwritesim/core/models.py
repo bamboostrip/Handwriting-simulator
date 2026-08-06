@@ -11,6 +11,17 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+def parse_color(value: str) -> tuple[int, int, int]:
+    """解析 #RRGGBB 或 RRGGBB 颜色值为 RGB 三元组，失败抛 ValueError。"""
+    text = str(value).strip().lstrip("#")
+    if len(text) != 6:
+        raise ValueError(f"颜色值应为 #RRGGBB 格式：{value!r}")
+    try:
+        return tuple(int(text[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+    except ValueError as exc:
+        raise ValueError(f"颜色值应为 #RRGGBB 格式：{value!r}") from exc
+
+
 @dataclass
 class Paragraph:
     """单个段落的排版信息。"""
@@ -65,6 +76,16 @@ class HandwritingParams:
         return (self.red, self.green, self.blue)
 
     @property
+    def color(self) -> str:
+        """字体颜色十六进制表示（#RRGGBB）。"""
+        return f"#{self.red:02x}{self.green:02x}{self.blue:02x}"
+
+    @color.setter
+    def color(self, value: str) -> None:
+        """按 #RRGGBB 十六进制设置字体颜色。"""
+        self.red, self.green, self.blue = parse_color(value)
+
+    @property
     def total_line_spacing(self) -> int:
         """handright 的 line_spacing 需包含字高。"""
         return int(self.line_spacing) + int(self.font_size)
@@ -97,6 +118,10 @@ class HandwritingParams:
                 raise self.ValidationError(f"{name} 不能为负")
         if self.perturb_theta_sigma < 0:
             raise self.ValidationError("perturb_theta_sigma 不能为负")
+        for name in ("red", "green", "blue"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or not 0 <= value <= 255:
+                raise self.ValidationError(f"{name} 必须在 0-255 之间")
 
     # ------------------------------------------------------------------
     # 序列化（保留旧版 18 行文本格式，兼容 GUI 的保存/载入预设）
@@ -131,11 +156,36 @@ class HandwritingParams:
             setattr(params, name, _coerce(raw, current))
         return params
 
+    # 预设仅保存排版参数，不含文本内容（text/paragraphs 不属于预设范围）
+    _PRESET_FIELDS: tuple[str, ...] = (
+        "font_path", "background_path",
+        "font_size", "word_spacing", "line_spacing",
+        "left_margin", "right_margin", "top_margin", "bottom_margin",
+        "word_spacing_sigma", "line_spacing_sigma", "font_size_sigma",
+        "perturb_x_sigma", "perturb_y_sigma", "perturb_theta_sigma",
+        "end_chars", "start_chars",
+    )
+
     def to_dict(self) -> dict[str, Any]:
+        """完整序列化（含文本内容），供测试/内存往返使用。"""
         return asdict(self)
+
+    def to_preset_dict(self) -> dict[str, Any]:
+        """导出预设字段：不含 text/paragraphs，颜色以 #RRGGBB 十六进制保存。"""
+        data = {name: getattr(self, name) for name in self._PRESET_FIELDS}
+        data["color"] = self.color
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HandwritingParams":
+        data = dict(data)
+        # 兼容新版 #RRGGBB 颜色值与旧版 red/green/blue 三个数字
+        if "color" in data:
+            try:
+                data["red"], data["green"], data["blue"] = parse_color(data["color"])
+            except ValueError as exc:
+                raise cls.ValidationError(str(exc)) from exc
+        data.pop("color", None)
         known = {f.name for f in fields(cls)}
         clean: dict[str, Any] = {k: v for k, v in data.items() if k in known}
         if isinstance(clean.get("paragraphs"), list):
