@@ -190,8 +190,10 @@ class MainWindow(QMainWindow):
         has_text = False
         for i in range(doc.blockCount()):
             block = doc.findBlockByNumber(i)
-            text = block.text().strip()
-            if text:
+            # 保留原始文本（含首尾空格）：左对齐时前导空格用于手动定位，
+            # 右对齐时尾部空格用于把文字从右缘顶进来
+            raw = block.text()
+            if raw.strip():
                 has_text = True
             fmt = block.blockFormat()
             alignment = fmt.alignment()
@@ -202,7 +204,7 @@ class MainWindow(QMainWindow):
             else:
                 align = "left"
             paras.append(
-                Paragraph(text=text, align=align, first_line_indent=int(fmt.textIndent()))
+                Paragraph(text=raw, align=align, first_line_indent=int(fmt.textIndent()))
             )
         return paras if has_text else []
 
@@ -359,7 +361,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "任务进行中，请稍候")
             return
         self._set_busy(True)
-        worker = RenderWorker(self._engine, params, mode, self._out_dir)
+        bounds = None
+        ui = self._ui
+        if mode == "preview" and ui.checkBox_bounds.isChecked():
+            bounds = (
+                self._int_of(ui.lineEdit_13, 76),
+                self._int_of(ui.lineEdit_14, 166),
+                self._int_of(ui.lineEdit_15, 166),
+            )
+        worker = RenderWorker(self._engine, params, mode, self._out_dir, bounds=bounds)
         worker.succeeded.connect(self._on_success)
         worker.preview_ready.connect(self._on_preview_ready)
         worker.failed.connect(self._on_failure)

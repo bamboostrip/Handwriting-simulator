@@ -157,23 +157,6 @@ def _center_text_lines(mask: np.ndarray) -> np.ndarray:
     return result
 
 
-def _right_text_lines(mask: np.ndarray, right_x: int) -> np.ndarray:
-    """按文本行测量非零 x 范围，逐行右对齐到 right_x。"""
-    height, width = mask.shape
-    rows = np.any(mask, axis=1)
-    if not rows.any():
-        return mask
-    result = np.zeros_like(mask)
-    for y0, y1 in _split_text_rows(rows):
-        band = mask[y0:y1]
-        ys, xs = np.nonzero(band)
-        shift = (right_x - 1) - int(xs.max())
-        nx = xs + shift
-        valid = (nx >= 0) & (nx < width)
-        result[y0 + ys[valid], nx[valid]] = True
-    return result
-
-
 def _layout_paragraph(
     params: HandwritingParams,
     rand: random.Random,
@@ -208,8 +191,9 @@ def _layout_paragraph(
         return font_cache[size]
 
     # 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径完全一致，
-    # 记录每字的 (字符, x, y, 字号)
-    chars: list[tuple[str, int, int, int]] = []
+    # 记录每字的 (字符, x, y, 字号, 行号) 与每行结束 x（含空格推进量）
+    chars: list[tuple[str, int, int, int, int]] = []
+    line_x_ends: list[float] = []
     i = 0
     y = line_spacing - font_size
     line_ys: list[float] = []
@@ -234,27 +218,34 @@ def _layout_paragraph(
             offset = _char_offset(
                 offset_cache, size, ch, resolve_font(size) if size != font_size_int else base_font
             )
-            chars.append((ch, round(x), yj, size))
+            chars.append((ch, round(x), yj, size, len(line_ys) - 1))
             x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
             i += 1
+        line_x_ends.append(x)
         y += line_spacing
 
     if not line_ys:
         return []
 
+    # 右对齐：按每行逻辑宽度（含尾部空格）平移到右边距，
+    # 这样尾部空格能把文字从右缘“顶”进来，与 Word 行为一致
+    shifts: list[float] | None = None
+    if paragraph.align == "right":
+        right_x = float(width) - float(right)
+        shifts = [right_x - xe for xe in line_x_ends]
+
     # 阶段二：按段落实际高度创建画布并绘制（不被页高裁剪）
     canvas_h = max(int(y + float(params.font_size) + 4 * float(params.line_spacing_sigma) + 4), 1)
     page = Image.new("1", (width, canvas_h), 0)
     draw = ImageDraw.Draw(page)
-    for ch, cx, cy, size in chars:
+    for ch, cx, cy, size, li in chars:
         font = base_font if size == font_size_int else resolve_font(size)
-        draw.text((cx, cy), ch, fill=1, font=font)
+        dx = round(cx + shifts[li]) if shifts is not None else cx
+        draw.text((dx, cy), ch, fill=1, font=font)
 
     mask = np.asarray(page, dtype=bool)
     if paragraph.align == "center":
         mask = _center_text_lines(mask)
-    elif paragraph.align == "right":
-        mask = _right_text_lines(mask, int(round(width - right)))
 
     # 按行提取墨迹：先用连通行带分出每行墨迹组（行间距大于墨迹高度时
     # 每行自成一带），再按顺序归属到各非空行，避免固定中点切分裁掉墨迹。

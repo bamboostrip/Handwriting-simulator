@@ -228,6 +228,24 @@ def test_paragraph_right_aligned(tmp_path: Path) -> None:
             assert abs(int(cols.max()) - (400 - 30)) < 15
 
 
+def test_paragraph_right_align_trailing_spaces(tmp_path: Path) -> None:
+    """右对齐尾部空格应把文字从右缘顶进来（与 Word 行为一致）。
+
+    回归：曾按墨迹右缘对齐且 GUI 收集时 strip 空格，
+    导致右对齐段落后加空格仍顶着右边距渲染。
+    """
+    def right_edge(paras) -> int:
+        params = _para_params(tmp_path, paras)
+        image = HandwritingEngine(backend="fast", seed=7).render_preview(params)
+        gray = np.asarray(image.convert("L"))
+        cols = np.where((gray < 128).any(axis=0))[0]
+        return int(cols.max())
+
+    plain = right_edge([Paragraph("汇报人：张三", align="right")])
+    spaced = right_edge([Paragraph("汇报人：张三    ", align="right")])
+    assert spaced < plain - 10
+
+
 def test_paragraph_float_margins_preview(tmp_path: Path) -> None:
     """预览降采样后边距为浮点，段落渲染不应报索引错误。
 
