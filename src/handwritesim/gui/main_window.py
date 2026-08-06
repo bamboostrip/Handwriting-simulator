@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import random
 from pathlib import Path
 
 from PIL import Image
@@ -17,7 +18,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ..core.engine import HandwritingEngine
 from ..core.models import HandwritingParams
 from ..core import presets
 from .workers import RenderWorker
@@ -32,8 +32,11 @@ class MainWindow(QMainWindow):
         self._ui = Ui_Form()
         self._ui.setupUi(self)
         self._out_dir = Path(out_dir)
-        self._engine = HandwritingEngine()
         self._worker: RenderWorker | None = None
+        # 最后一次预览使用的随机种子与参数快照：导出复用两者，
+        # 保证导出的内容与屏幕上最后一次预览逐像素一致
+        self._preview_seed: int | None = None
+        self._preview_params: HandwritingParams | None = None
         # 预览全部页与当前页索引
         self._preview_pages: list = []
         self._preview_index = 0
@@ -297,34 +300,57 @@ class MainWindow(QMainWindow):
     # 按钮事件
     # ------------------------------------------------------------------
     def _on_preview(self) -> None:
-        params = self._downsample_preview(self.collect_params())
+        raw = self.collect_params()
+        params = self._downsample_preview(raw)
         try:
             params.validate(require_text=True)
         except HandwritingParams.ValidationError as exc:
             QMessageBox.information(self, "参数检查", str(exc))
             return
         self._auto = False
-        self._start_worker(params, "preview")
+        seed = self._new_seed()
+        if self._start_worker(params, "preview", seed=seed):
+            self._remember_preview(seed, raw)
 
     def _on_auto_preview(self) -> None:
         """防抖触发的自动预览：参数不完整时静默跳过。"""
-        params = self._downsample_preview(self.collect_params())
+        raw = self.collect_params()
+        params = self._downsample_preview(raw)
         try:
             params.validate(require_text=True)
         except HandwritingParams.ValidationError:
             return
         self._auto = True
-        # 连续输入时上一次渲染可能仍在进行，静默跳过本次，避免弹窗打断输入
-        self._start_worker(params, "preview", quiet=True)
+        # 连续输入时上一次渲染可能仍在进行，静默跳过本次，避免弹窗打断输入；
+        # 注意：被跳过的预览不得更新 seed/参数快照，否则屏幕内容仍是旧预览，
+        # 而导出却用了新 seed+新参数，导致预览与导出对不上
+        seed = self._new_seed()
+        if self._start_worker(params, "preview", quiet=True, seed=seed):
+            self._remember_preview(seed, raw)
+
+    def _new_seed(self) -> int:
+        """生成一个新随机种子（暂不记录，仅渲染真正启动后生效）。"""
+        return random.SystemRandom().randrange(2**31)
+
+    def _remember_preview(self, seed: int, raw: HandwritingParams) -> None:
+        """记录最后一次预览的种子与参数快照（导出复用，保证与预览一致）。
+
+        快照保存原始（未降采样）参数：导出始终全分辨率渲染；
+        常见背景（≤4096px）下预览未降采样，导出与预览逐像素一致。
+        """
+        self._preview_seed = seed
+        self._preview_params = raw
 
     def _on_export(self) -> None:
-        params = self.collect_params()
+        # 优先复用最后一次预览的参数与种子：导出的内容与屏幕上的
+        # 预览一致；从未预览过时用当前界面参数，每次导出保持随机
+        params = self._preview_params if self._preview_params is not None else self.collect_params()
         try:
             params.validate(require_text=True)
         except HandwritingParams.ValidationError as exc:
             QMessageBox.information(self, "参数检查", str(exc))
             return
-        self._start_worker(params, "export")
+        self._start_worker(params, "export", seed=self._preview_seed)
 
     def _on_save_preset(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -400,17 +426,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 后台任务
     # ------------------------------------------------------------------
-    def _start_worker(self, params: HandwritingParams, mode: str, quiet: bool = False) -> None:
+    def _start_worker(
+        self, params: HandwritingParams, mode: str, quiet: bool = False, seed: object | None = None
+    ) -> bool:
+        """启动后台任务；worker 忙时跳过并返回 False（调用方据此决定是否记录状态）。"""
         if self._worker is not None and self._worker.isRunning():
             if not quiet:
                 QMessageBox.information(self, "提示", "任务进行中，请稍候")
-            return
+            return False
         self._set_busy(True)
         bounds = None
         ui = self._ui
         if mode == "preview" and ui.checkBox_bounds.isChecked():
             bounds = self._color_of(ui.lineEdit_13, (76, 166, 166))
-        worker = RenderWorker(self._engine, params, mode, self._out_dir, bounds=bounds)
+        worker = RenderWorker(params, mode, self._out_dir, bounds=bounds, seed=seed)
         worker.succeeded.connect(self._on_success)
         worker.preview_ready.connect(self._on_preview_ready)
         worker.failed.connect(self._on_failure)
@@ -419,6 +448,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(lambda w=worker: self._forget_worker(w))
         self._worker = worker
         worker.start()
+        return True
 
     def _forget_worker(self, worker) -> None:
         """清空已结束 worker 的引用，防止访问已销毁的 C++ 对象。"""

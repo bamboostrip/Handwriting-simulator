@@ -264,3 +264,55 @@ def test_paragraph_float_margins_preview(tmp_path: Path) -> None:
     assert image.size == (400, 300)
     gray = np.asarray(image.convert("L"))
     assert gray.min() < 128
+
+
+# ---------------------------------------------------------------------------
+# 预览/导出随机一致性（seed 机制）
+# ---------------------------------------------------------------------------
+def test_same_seed_preview_matches_export(tmp_path: Path) -> None:
+    """相同 seed 的独立引擎，预览（generate）与导出（save_all）应逐像素一致。
+
+    回归：GUI 曾共享一个 seed=None 的引擎实例，预览消耗随机数序列后
+    再导出，笔画扰动完全不同，导致预览满意但导出对不上。
+    """
+    params = _params(tmp_path, "预览与导出一致性测试。" * 40)
+
+    # 模拟 GUI 预览：新引擎 + seed，渲染全部页
+    preview_pages = list(HandwritingEngine(backend="fast", seed=2024).generate(params))
+    # 模拟 GUI 导出：另一个新引擎 + 相同 seed
+    out = tmp_path / "export"
+    files = HandwritingEngine(backend="fast", seed=2024).save_all(params, out)
+    export_pages = [Image.open(f) for f in files]
+
+    assert len(export_pages) == len(preview_pages) >= 2
+    for a, b in zip(preview_pages, export_pages):
+        assert np.array_equal(np.asarray(a.convert("L")), np.asarray(b.convert("L")))
+
+
+def test_same_seed_paragraph_preview_matches_export(tmp_path: Path) -> None:
+    """段落路径下，相同 seed 的预览与导出同样逐像素一致。"""
+    params = _para_params(tmp_path, [
+        Paragraph("标题", align="center"),
+        Paragraph("正文段落内容。" * 60),
+    ])
+
+    preview_pages = list(HandwritingEngine(backend="fast", seed=42).generate(params))
+    out = tmp_path / "export"
+    files = HandwritingEngine(backend="fast", seed=42).save_all(params, out)
+    export_pages = [Image.open(f) for f in files]
+
+    assert len(export_pages) == len(preview_pages) >= 2
+    for a, b in zip(preview_pages, export_pages):
+        assert np.array_equal(np.asarray(a.convert("L")), np.asarray(b.convert("L")))
+
+
+def test_different_seed_gives_different_strokes(tmp_path: Path) -> None:
+    """不同 seed 应产生不同笔画，保证预览刷新能获得新随机效果。"""
+    params = _params(tmp_path, "随机性差异测试文本。" * 5)
+    a = np.asarray(
+        HandwritingEngine(backend="fast", seed=1).render_preview(params).convert("L")
+    )
+    b = np.asarray(
+        HandwritingEngine(backend="fast", seed=2).render_preview(params).convert("L")
+    )
+    assert not np.array_equal(a, b)

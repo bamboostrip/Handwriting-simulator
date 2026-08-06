@@ -49,25 +49,29 @@ class RenderWorker(QThread):
 
     def __init__(
         self,
-        engine: HandwritingEngine,
         params: HandwritingParams,
         mode: Mode,
         out_dir: str | Path = "output",
         parent=None,
         bounds: tuple[int, int, int] | None = None,
+        seed: object | None = None,
     ) -> None:
         super().__init__(parent)
-        self._engine = engine
         self._params = params
         self._mode = mode
         self._out_dir = out_dir
         self._bounds = bounds
+        self._seed = seed
 
     def run(self) -> None:  # noqa: D102
+        # 每次渲染都新建引擎并注入 seed：预览与导出只要 seed 相同，
+        # 随机序列就从同一状态开始，笔画扰动完全一致；
+        # 若共享一个引擎实例，预览会消耗随机数导致导出对不上。
+        engine = HandwritingEngine(seed=self._seed)
         try:
             if self._mode == "preview":
                 pixmaps = []
-                for im in self._engine.generate(self._params):
+                for im in engine.generate(self._params):
                     if self._bounds is not None:
                         im = _bounds_overlay(im, self._params, self._bounds)
                     else:
@@ -76,7 +80,7 @@ class RenderWorker(QThread):
                 self.preview_ready.emit(pixmaps)
                 self.succeeded.emit([])
             else:
-                files = self._engine.save_all(self._params, self._out_dir)
+                files = engine.save_all(self._params, self._out_dir)
                 self.succeeded.emit([str(f) for f in files])
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
