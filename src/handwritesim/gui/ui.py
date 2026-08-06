@@ -48,7 +48,7 @@ QGroupBox {
 }
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
 PreviewLabel {
-    background: #ffffff;
+    background: #c8d0ca;
     border: 1px solid #d3ded6;
     border-radius: 6px;
 }
