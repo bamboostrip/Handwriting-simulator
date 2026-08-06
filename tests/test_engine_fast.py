@@ -144,6 +144,60 @@ def test_paragraph_center_is_centered(tmp_path: Path) -> None:
     assert abs(center - 200) < 20
 
 
+def test_paragraph_rhythm_matches_plain(tmp_path: Path) -> None:
+    """无格式段落的渲染应与纯文本路径逐行一致。
+
+    回归：GUI 富文本化后所有文本走段落路径，而 _paragraph_pages
+    曾在每段后额外叠加一整行行距，导致段间多出空行、首行偏高，
+    预览与旧版纯文本样式不一致。
+    """
+    text = "思想汇报\n敬爱的党组织:\n时光荏苒，第四季度工作与学习已近尾声。"
+    plain = _params(tmp_path, text)
+    img_plain = HandwritingEngine(backend="fast", seed=7).render_preview(plain)
+
+    para = _params(tmp_path, text)
+    para.paragraphs = [Paragraph(line) for line in text.split("\n")]
+    img_para = HandwritingEngine(backend="fast", seed=7).render_preview(para)
+
+    a = np.asarray(img_plain.convert("L"))
+    b = np.asarray(img_para.convert("L"))
+    assert np.array_equal(a, b)
+
+
+def test_paragraph_multipage_matches_plain(tmp_path: Path) -> None:
+    """长文的段落路径应与纯文本路径逐页一致（首页不留空白）。
+
+    回归：段落曾作为分页最小单位，下一段放不下整段时第一页底部
+    留出大片空白，而纯文本路径是逐行流式填满页面的。
+    """
+    text = "思想汇报\n" + "第一段正文内容。" * 30 + "\n" + "第二段正文内容。" * 30
+    plain = _params(tmp_path, text)
+    pages_plain = list(HandwritingEngine(backend="fast", seed=7).generate(plain))
+
+    para = _params(tmp_path, text)
+    para.paragraphs = [Paragraph(line) for line in text.split("\n")]
+    pages_para = list(HandwritingEngine(backend="fast", seed=7).generate(para))
+
+    assert len(pages_para) == len(pages_plain) >= 2
+    for a, b in zip(pages_plain, pages_para):
+        assert np.array_equal(np.asarray(a.convert("L")), np.asarray(b.convert("L")))
+
+
+def test_paragraph_empty_line_matches_plain(tmp_path: Path) -> None:
+    """空段落应保留一行空行，与纯文本 \n\n 的行为一致。"""
+    text = "第一行\n\n第二行"
+    plain = _params(tmp_path, text)
+    img_plain = HandwritingEngine(backend="fast", seed=7).render_preview(plain)
+
+    para = _params(tmp_path, text)
+    para.paragraphs = [Paragraph(line) for line in text.split("\n")]
+    img_para = HandwritingEngine(backend="fast", seed=7).render_preview(para)
+
+    a = np.asarray(img_plain.convert("L"))
+    b = np.asarray(img_para.convert("L"))
+    assert np.array_equal(a, b)
+
+
 def test_paragraph_float_margins_preview(tmp_path: Path) -> None:
     """预览降采样后边距为浮点，段落渲染不应报索引错误。
 

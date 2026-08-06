@@ -37,8 +37,10 @@ class MainWindow(QMainWindow):
         # 预览全部页与当前页索引
         self._preview_pages: list = []
         self._preview_index = 0
-        # 预览分辨率上限：超过则降采样，保证实时
-        self._preview_max_width = 1000
+        # 预览分辨率上限：fast 引擎全分辨率渲染已足够快（约 0.15s/页），
+        # 上限设高使常见信纸（如 2480 宽）预览与原始程序一样全分辨率渲染，
+        # 避免降采样导致笔画变细碎裂、扰动后发丑；仅对超大背景兜底降采样。
+        self._preview_max_width = 4096
         # 输入防抖：停止输入后自动预览，实现实时效果
         self._auto = False
         self._preview_timer = QTimer(self)
@@ -169,24 +171,29 @@ class MainWindow(QMainWindow):
         return p
 
     def _collect_paragraphs(self):
-        """从富文本编辑器的块格式收集段落。"""
+        """从富文本编辑器的块格式收集段落。
+
+        空行保留为空段落，使渲染结果与纯文本路径的空行行为一致；
+        全文为空时返回 []，交由校验提示未输入文字。
+        """
         from PyQt6.QtCore import Qt
 
         from ..core.models import Paragraph
 
         doc = self._ui.textEdit.document()
         paras: list[Paragraph] = []
+        has_text = False
         for i in range(doc.blockCount()):
             block = doc.findBlockByNumber(i)
             text = block.text().strip()
-            if not text:
-                continue
+            if text:
+                has_text = True
             fmt = block.blockFormat()
             align = "center" if fmt.alignment() & Qt.AlignmentFlag.AlignCenter else "left"
             paras.append(
                 Paragraph(text=text, align=align, first_line_indent=int(fmt.textIndent()))
             )
-        return paras
+        return paras if has_text else []
 
     def apply_params(self, p: HandwritingParams) -> None:
         """将 HandwritingParams 回填到界面控件。"""

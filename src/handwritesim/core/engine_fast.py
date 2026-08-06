@@ -162,14 +162,16 @@ def _layout_paragraph(
     rand: random.Random,
     paragraph: Paragraph,
     width: int,
-    height: int,
-) -> tuple[np.ndarray, int]:
-    """渲染单个段落，返回裁剪后的内容 mask（bool）与占用高度。"""
-    page = Image.new("1", (width, height), 0)
-    draw = ImageDraw.Draw(page)
+) -> list[tuple[np.ndarray | None, float]]:
+    """渲染单个段落，返回逐行列表 [(该行裁剪墨迹 mask, 墨迹相对该行绘制基线的偏移)]。
+
+    空行对应 (None, 0.0)，仅占用行节奏。画布按段落自身高度创建
+    （不受页高裁剪），以便拼接时像纯文本路径一样逐行流式跨页。
+    """
     base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
     font_cache: dict[int, ImageFont.FreeTypeFont] = {}
     font_size = params.font_size
+    font_size_int = int(font_size)
     line_spacing = float(params.line_spacing) + float(params.font_size)
     end_chars = params.end_chars
     start_chars = params.start_chars
@@ -188,9 +190,14 @@ def _layout_paragraph(
             )
         return font_cache[size]
 
+    # 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径完全一致，
+    # 记录每字的 (字符, x, y, 字号)
+    chars: list[tuple[str, int, int, int]] = []
     i = 0
     y = line_spacing - font_size
+    line_ys: list[float] = []
     while i < text_len:
+        line_ys.append(y)
         x = left + (paragraph.first_line_indent if i == 0 else 0)
         while i < text_len:
             ch = text[i]
@@ -201,28 +208,53 @@ def _layout_paragraph(
                 break
             if x > width - right - font_size and ch not in end_chars:
                 break
-            xy = (round(x), round(rand.gauss(y, params.line_spacing_sigma)))
-            font = base_font
-            size = int(font_size)
+            yj = round(rand.gauss(y, params.line_spacing_sigma))
+            size = font_size_int
             if params.font_size_sigma:
                 size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
                 if size != font_size:
-                    font = resolve_font(size)
-            draw.text(xy, ch, fill=1, font=font)
-            offset = _char_offset(offset_cache, size, ch, font)
+                    resolve_font(size)
+            offset = _char_offset(
+                offset_cache, size, ch, resolve_font(size) if size != font_size_int else base_font
+            )
+            chars.append((ch, round(x), yj, size))
             x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
             i += 1
         y += line_spacing
 
+    if not line_ys:
+        return []
+
+    # 阶段二：按段落实际高度创建画布并绘制（不被页高裁剪）
+    canvas_h = max(int(y + float(params.font_size) + 4 * float(params.line_spacing_sigma) + 4), 1)
+    page = Image.new("1", (width, canvas_h), 0)
+    draw = ImageDraw.Draw(page)
+    for ch, cx, cy, size in chars:
+        font = base_font if size == font_size_int else resolve_font(size)
+        draw.text((cx, cy), ch, fill=1, font=font)
+
     mask = np.asarray(page, dtype=bool)
     if paragraph.align == "center":
         mask = _center_text_lines(mask)
+
+    # 按行提取墨迹：先用连通行带分出每行墨迹组（行间距大于墨迹高度时
+    # 每行自成一带），再按顺序归属到各非空行，避免固定中点切分裁掉墨迹。
     rows = np.any(mask, axis=1)
-    if not rows.any():
-        return np.zeros((0, width), dtype=bool), 0
-    first = int(np.argmax(rows))
-    last = int(len(rows) - 1 - np.argmax(rows[::-1]))
-    return mask[first : last + 1], last - first + 1
+    bands = _split_text_rows(rows)
+    lines: list[tuple[np.ndarray | None, float]] = []
+    bi = 0
+    # 墨迹相对绘制基线的合理窗口；超出说明归属错位，钳制避免
+    # 某行被甩到远离其行槽的位置（如页顶残留）
+    off_min, off_max = -0.25 * line_spacing, 0.8 * line_spacing
+    for yk in line_ys:
+        if bi < len(bands) and bands[bi][0] < yk + line_spacing / 2:
+            s, e = bands[bi]
+            bi += 1
+            off = min(max(float(s) - yk, off_min), off_max)
+            lines.append((mask[s:e], off))
+        else:
+            lines.append((None, 0.0))  # 空行：仅占用行节奏
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -311,34 +343,48 @@ class FastEngine:
         return self.generate_pages(params)
 
     def _paragraph_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
-        """按段落逐页渲染（段落为跨页最小单位）。"""
+        """按段落逐页渲染，逐行流式分页（与纯文本路径填满页面一致）。
+
+        行节奏与纯文本路径对齐：首行绘制基线位于 top + line_spacing（不含字高），
+        每行（含段内换行、段落边界、空行）均推进一个完整行距；
+        某行的绘制基线越过页底限制时才换页，保证首页不留空白。
+        """
         background = np.asarray(Image.open(params.background_path).convert("RGB"))
         rand = self._new_rand()
         height, width = background.shape[:2]
         line_spacing = float(params.line_spacing) + float(params.font_size)
+        lead = line_spacing - float(params.font_size)
         # 预览降采样会使边距为浮点，这里取整以保证 numpy 索引为整数
         top, bottom = int(params.top_margin), int(params.bottom_margin)
+        # 与纯文本路径 _layout_page 的换页条件一致
+        limit = height - bottom - float(params.font_size)
 
-        para_masks: list[tuple[np.ndarray, int]] = []
+        all_lines: list[tuple[np.ndarray | None, float]] = []
         for para in params.paragraphs or []:
-            if not para.text:
-                continue
-            content, ph = _layout_paragraph(params, rand, para, width, height)
-            para_masks.append((content, ph))
+            lines = _layout_paragraph(params, rand, para, width)
+            if not lines:
+                lines = [(None, 0.0)]  # 空段保留一行空行
+            all_lines.extend(lines)
 
         page_canvas = np.zeros((height, width), dtype=bool)
-        used = top
-        for content, ph in para_masks:
-            if ph <= 0:
-                continue
-            if used + ph > height - bottom:
+        yielded = False
+        draw_y = float(top) + lead
+        for band, off in all_lines:
+            # 与纯文本路径一致：每行（含空行）开始前检查是否越页底
+            if draw_y > limit and page_canvas.any():
                 yield self._finalize(params, page_canvas, background)
+                yielded = True
                 page_canvas = np.zeros((height, width), dtype=bool)
-                used = top
-            ys, xs = np.nonzero(content)
-            page_canvas[used + ys, xs] = True
-            used += ph + int(round(line_spacing))
-        if page_canvas.any():
+                draw_y = float(top) + lead
+            if band is not None:
+                row0 = int(round(draw_y + off))
+                ys, xs = np.nonzero(band)
+                rows = row0 + ys
+                # 裁掉越界行（负索引会回绕到页底产生鬼影）
+                valid = (rows >= 0) & (rows < height)
+                page_canvas[rows[valid], xs[valid]] = True
+            draw_y += line_spacing
+        if page_canvas.any() or not yielded:
             yield self._finalize(params, page_canvas, background)
 
     # _finalize 使用 self._rng，与 generate_pages 共用同一随机源
