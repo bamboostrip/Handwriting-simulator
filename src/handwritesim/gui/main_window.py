@@ -20,12 +20,25 @@ from PyQt6.QtWidgets import (
 
 from ..core.models import HandwritingParams
 from ..core import presets
+from ..core.paths import assets_root, ensure_assets_dirs
 from .workers import RenderWorker
 from .ui import Ui_Form
 
 
+def _is_under_assets(path: Path) -> bool:
+    """判断路径是否位于资产根目录（exe 旁）内。"""
+    try:
+        path.resolve().relative_to(Path(assets_root()).resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 class MainWindow(QMainWindow):
     """手写模拟器主窗口。"""
+
+    # 预设下拉框占位项：选中时不触发加载
+    _PRESET_PLACEHOLDER = "— 选择预设 —"
 
     def __init__(self, out_dir: str | Path = "output") -> None:
         super().__init__()
@@ -33,6 +46,8 @@ class MainWindow(QMainWindow):
         self._ui.setupUi(self)
         self._out_dir = Path(out_dir)
         self._worker: RenderWorker | None = None
+        # 便携模式：确保 exe 旁 fonts/backgrounds/presets 目录存在
+        ensure_assets_dirs()
         # 最后一次预览使用的随机种子与参数快照：导出复用两者，
         # 保证导出的内容与屏幕上最后一次预览逐像素一致
         self._preview_seed: int | None = None
@@ -52,6 +67,7 @@ class MainWindow(QMainWindow):
         self._preview_timer.timeout.connect(self._on_auto_preview)
 
         self._connect_signals()
+        self._refresh_preset_combo()
         self._update_page_nav()
 
     # ------------------------------------------------------------------
@@ -65,6 +81,7 @@ class MainWindow(QMainWindow):
         ui.pushButton_5.clicked.connect(self._on_export)
         ui.pushButton_4.clicked.connect(self._on_save_preset)
         ui.pushButton_6.clicked.connect(self._on_load_preset)
+        ui.combo_preset.currentIndexChanged.connect(self._on_preset_combo_changed)
         # 富文本排版工具
         ui.btn_align_left.clicked.connect(lambda: self._set_block_align(0))
         ui.btn_center.clicked.connect(lambda: self._set_block_align(1))
@@ -178,12 +195,16 @@ class MainWindow(QMainWindow):
     # 文件选择
     # ------------------------------------------------------------------
     def _choose_font(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择字体", "", "字体 (*.ttf *.ttc *.otf)")
+        # 默认打开 exe 旁的 fonts/ 目录，便于用户放入字体后直接选择
+        start_dir = str(Path(assets_root()) / "fonts")
+        path, _ = QFileDialog.getOpenFileName(self, "选择字体", start_dir, "字体 (*.ttf *.ttc *.otf)")
         if path:
             self._ui.lineEdit.setText(path)
 
     def _choose_background(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择背景", "", "图片 (*.png *.jpg *.jpeg *.bmp)")
+        # 默认打开 exe 旁的 backgrounds/ 目录
+        start_dir = str(Path(assets_root()) / "backgrounds")
+        path, _ = QFileDialog.getOpenFileName(self, "选择背景", start_dir, "图片 (*.png *.jpg *.jpeg *.bmp)")
         if path:
             self._ui.lineEdit_2.setText(path)
 
@@ -353,8 +374,10 @@ class MainWindow(QMainWindow):
         self._start_worker(params, "export", seed=self._preview_seed)
 
     def _on_save_preset(self) -> None:
+        # 默认保存到 exe 旁的 presets/ 目录，文件名可自行编辑
+        default_path = str(Path(assets_root()) / "presets" / "preset.json")
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存预设", "preset.json", "预设 (*.json);;旧版文本 (*.txt *.preset)"
+            self, "保存预设", default_path, "预设 (*.json);;旧版文本 (*.txt *.preset)"
         )
         if not path:
             return
@@ -363,13 +386,61 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "保存失败", str(exc))
             return
+        # 保存到预设文件夹时同步到快捷下拉框
+        self._refresh_preset_combo(select=path)
         QMessageBox.information(self, "完成", "预设已保存")
 
     def _on_load_preset(self) -> None:
+        # 默认打开 exe 旁的 presets/ 目录，也允许选择任意位置
+        start_dir = str(Path(assets_root()) / "presets")
         path, _ = QFileDialog.getOpenFileName(
-            self, "载入预设", "", "预设 (*.json *.txt *.preset)"
+            self, "载入预设", start_dir, "预设 (*.json *.txt *.preset)"
         )
         if not path:
+            return
+        try:
+            self.apply_params(presets.load(path))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "载入失败", str(exc))
+            return
+        # 载入的预设位于预设文件夹内时，同步高亮下拉框
+        if _is_under_assets(Path(path)):
+            self._refresh_preset_combo(select=path)
+
+    def _refresh_preset_combo(self, select: str | None = None) -> None:
+        """扫描预设文件夹，刷新快捷切换下拉框。
+
+        select 为要选中的预设文件路径（位于预设文件夹内时高亮）。
+        """
+        combo = self._ui.combo_preset
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(self._PRESET_PLACEHOLDER)
+        preset_dir = Path(assets_root()) / "presets"
+        files = sorted(
+            p for p in preset_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in (".json", ".preset", ".txt")
+        )
+        for p in files:
+            combo.addItem(p.stem, userData=str(p))
+        if select:
+            target = Path(select).resolve()
+            for i in range(1, combo.count()):
+                if Path(combo.itemData(i)).resolve() == target:
+                    combo.setCurrentIndex(i)
+                    break
+            else:
+                combo.setCurrentIndex(0)
+        else:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _on_preset_combo_changed(self, index: int) -> None:
+        """下拉框切换预设：跳过占位项，载入并应用到界面。"""
+        if index <= 0:
+            return
+        path = self._ui.combo_preset.itemData(index)
+        if not path or not Path(path).is_file():
             return
         try:
             self.apply_params(presets.load(path))

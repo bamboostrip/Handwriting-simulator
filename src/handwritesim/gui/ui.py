@@ -229,17 +229,20 @@ class Ui_Form(object):
         row_color.addStretch(1)
         v.addLayout(row_color)
 
-        # 预设
+        # 预设：下拉框快捷切换（预设文件夹内）+ 载入/保存按钮（任意位置）
         row_preset = QtWidgets.QHBoxLayout()
         self.label_preset = QtWidgets.QLabel(panel)
         row_preset.addWidget(self.label_preset)
+        self.combo_preset = QtWidgets.QComboBox(panel)
+        self.combo_preset.setObjectName("combo_preset")
+        self.combo_preset.setMinimumWidth(90)
+        row_preset.addWidget(self.combo_preset, 1)
         self.pushButton_6 = QtWidgets.QPushButton(panel)
         self.pushButton_6.setObjectName("pushButton_6")
         row_preset.addWidget(self.pushButton_6)
         self.pushButton_4 = QtWidgets.QPushButton(panel)
         self.pushButton_4.setObjectName("pushButton_4")
         row_preset.addWidget(self.pushButton_4)
-        row_preset.addStretch(1)
         v.addLayout(row_preset)
 
         # 排版参数

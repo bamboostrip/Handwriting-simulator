@@ -114,3 +114,99 @@ def test_to_from_lines() -> None:
 def test_from_lines_rejects_short() -> None:
     with pytest.raises(HandwritingParams.ValidationError):
         HandwritingParams.from_lines(["1", "2"])
+
+
+# ----------------------------------------------------------------------
+# 便携模式：相对路径按资产根目录（exe 旁）双向转换
+# ----------------------------------------------------------------------
+
+
+def _make_assets(tmp_path: Path) -> Path:
+    """在 tmp_path 下构造便携目录结构并返回资产根。"""
+    fonts = tmp_path / "fonts"
+    fonts.mkdir()
+    (fonts / "a.ttf").write_bytes(b"fake font")
+    backgrounds = tmp_path / "backgrounds"
+    backgrounds.mkdir()
+    (backgrounds / "paper.jpg").write_bytes(b"fake bg")
+    (tmp_path / "presets").mkdir()
+    return tmp_path
+
+
+@pytest.fixture()
+def portable_root(tmp_path: Path, monkeypatch) -> Path:
+    """将资产根目录重定向到临时目录，避免污染项目根。"""
+    root = _make_assets(tmp_path)
+    monkeypatch.setattr(presets, "assets_root", lambda: str(root))
+    return root
+
+
+def test_to_portable_inside_assets(portable_root: Path) -> None:
+    """资产根目录内的绝对路径应转为相对路径。"""
+    font = str(portable_root / "fonts" / "a.ttf")
+    assert presets.to_portable_path(font) == "fonts/a.ttf"
+
+
+def test_to_portable_outside_assets(portable_root: Path, tmp_path: Path) -> None:
+    """资产根目录外的绝对路径保持绝对路径（本机引用）。"""
+    external = str(tmp_path.parent / "elsewhere" / "b.ttf")
+    assert presets.to_portable_path(external) == external
+
+
+def test_from_portable_resolves_to_assets(portable_root: Path) -> None:
+    """相对路径按资产根目录解析为绝对路径。"""
+    assert presets.from_portable_path("fonts/a.ttf") == str(
+        portable_root / "fonts" / "a.ttf"
+    )
+
+
+def test_from_portable_absolute_kept(portable_root: Path) -> None:
+    """绝对路径原样返回。"""
+    absolute = str(portable_root / "fonts" / "a.ttf")
+    assert presets.from_portable_path(absolute) == absolute
+
+
+def test_from_portable_missing_falls_back(portable_root: Path) -> None:
+    """相对路径对应文件不存在时回退原字符串，交由校验提示用户。"""
+    assert presets.from_portable_path("fonts/not-exist.ttf") == "fonts/not-exist.ttf"
+
+
+def test_save_store_portable_paths(portable_root: Path) -> None:
+    """保存预设时，资产根内的字体/背景路径应写成相对路径。"""
+    params = HandwritingParams(
+        font_path=str(portable_root / "fonts" / "a.ttf"),
+        background_path=str(portable_root / "backgrounds" / "paper.jpg"),
+    )
+    path = portable_root / "presets" / "p.json"
+    presets.save(path, params)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["params"]["font_path"] == "fonts/a.ttf"
+    assert raw["params"]["background_path"] == "backgrounds/paper.jpg"
+
+
+def test_load_resolves_portable_paths(portable_root: Path) -> None:
+    """载入预设时，相对路径应按资产根目录解析回绝对路径。"""
+    path = portable_root / "presets" / "p.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "params": {
+                    "font_path": "fonts/a.ttf",
+                    "background_path": "backgrounds/paper.jpg",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = presets.load(path)
+    assert loaded.font_path == str(portable_root / "fonts" / "a.ttf")
+    assert loaded.background_path == str(portable_root / "backgrounds" / "paper.jpg")
+
+
+def test_save_does_not_mutate_caller(portable_root: Path) -> None:
+    """保存预设不得改写调用方传入的参数对象。"""
+    params = HandwritingParams(font_path=str(portable_root / "fonts" / "a.ttf"))
+    path = portable_root / "presets" / "p.json"
+    presets.save(path, params)
+    assert params.font_path == str(portable_root / "fonts" / "a.ttf")
