@@ -17,11 +17,16 @@ Remove-Item -Recurse -Force $dist, (Join-Path $root "build") -ErrorAction Silent
 uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 
 # 组装便携包：exe + 预设 + 背景 + fonts 目录（与 Actions 产物结构一致）
+# 本地打包额外携带 fonts/ 下的字体（自用，版权字体不入库不上传）
 Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$staging\fonts", "$staging\backgrounds", "$staging\presets" | Out-Null
 Copy-Item -Recurse (Join-Path $root "backgrounds\*") "$staging\backgrounds\"
 Copy-Item -Recurse (Join-Path $root "presets\*") "$staging\presets\"
 Copy-Item (Join-Path $dist "HandWriteSim.exe") "$staging\"
+# 本地字体目录（存在则全部携带，供自用）
+if (Test-Path (Join-Path $root "fonts")) {
+    Copy-Item -Recurse (Join-Path $root "fonts\*") "$staging\fonts\" -Force
+}
 Copy-Item (Join-Path $root "packaging\fonts-README.txt") "$staging\fonts\README.txt"
 
 $zip = Join-Path $dist "HandWriteSim-windows-x86_64.zip"
