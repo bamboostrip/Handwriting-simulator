@@ -126,3 +126,34 @@ def test_export_without_preview_uses_current_params(window, monkeypatch) -> None
 
     assert captured["seed"] is None
     assert captured["params"].text == "预览导出一致性测试。"
+
+
+def test_preset_combo_wheel_does_not_switch(qapp, tmp_path: Path) -> None:
+    """预设下拉框必须点击切换：滚轮滚动不得触发切换（避免误触）。
+
+    预设下拉框位于可滚动面板内，若滚轮直接切换预设，用户滚动参数面板时
+    会误触发配置变更，故需忽略滚轮事件（与 NoWheelSpinBox 同策略）。
+    """
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+
+    from handwritesim.gui.ui import NoWheelComboBox
+
+    win = MainWindow(out_dir=tmp_path / "out")
+    combo = win._ui.combo_preset
+    assert isinstance(combo, NoWheelComboBox)
+
+    # 构造向下滚动事件（angleDelta.y > 0）：默认行为会切换选项
+    event = QWheelEvent(
+        QPointF(0, 0),
+        QPointF(0, 0),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    combo.setCurrentIndex(0)
+    combo.wheelEvent(event)
+    assert combo.currentIndex() == 0  # 滚轮不得改变当前项

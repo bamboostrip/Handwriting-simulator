@@ -72,6 +72,13 @@ class NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
         event.ignore()
 
 
+class NoWheelComboBox(QtWidgets.QComboBox):
+    """禁用鼠标滚轮切换的下拉框，避免滚动面板时误切换选项。"""
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+
 class PreviewLabel(QtWidgets.QLabel):
     """预览区：保持宽高比缩放，随窗口尺寸自适应。"""
 
@@ -233,7 +240,7 @@ class Ui_Form(object):
         row_preset = QtWidgets.QHBoxLayout()
         self.label_preset = QtWidgets.QLabel(panel)
         row_preset.addWidget(self.label_preset)
-        self.combo_preset = QtWidgets.QComboBox(panel)
+        self.combo_preset = NoWheelComboBox(panel)
         self.combo_preset.setObjectName("combo_preset")
         self.combo_preset.setMinimumWidth(90)
         row_preset.addWidget(self.combo_preset, 1)
