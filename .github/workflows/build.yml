@@ -35,10 +35,14 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Sync dependencies
-        run: uv sync --extra dev
+        # 固定 Python 3.12：PyQt6/numpy/scipy 在 Windows/macOS/Linux 均有
+        # 预编译 wheel，避免新 Python 版本（如 3.14）在部分平台无包导致首次构建失败
+        run: |
+          uv python install 3.12
+          uv sync --extra dev --python 3.12
 
       - name: Build (PyInstaller onefile)
-        run: uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
+        run: uv run --python 3.12 --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 
       # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
       - name: Ad-hoc sign (macOS)
