@@ -1,0 +1,92 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: HandWriteSim-windows-x86_64
+            exe_name: HandWriteSim.exe
+          - os: ubuntu-latest
+            artifact: HandWriteSim-linux-x86_64
+            exe_name: HandWriteSim
+          - os: macos-latest
+            artifact: HandWriteSim-macos-arm64
+            exe_name: HandWriteSim
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Build (PyInstaller onefile)
+        run: uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
+
+      # macOS 可执行文件需 ad-hoc 签名，否则 Gatekeeper 会拦截
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --deep -s - "dist/${{ matrix.exe_name }}"
+
+      # 组装便携包：exe + 预设 + 背景 + 空 fonts 目录（用户自备字体）
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "staging/fonts", "staging/backgrounds", "staging/presets" | Out-Null
+          Copy-Item -Recurse "backgrounds/*" "staging/backgrounds/"
+          Copy-Item -Recurse "presets/*" "staging/presets/"
+          Copy-Item "dist/${{ matrix.exe_name }}" "staging/"
+          Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
+          Compress-Archive -Path "staging/*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          mkdir -p staging/fonts staging/backgrounds staging/presets
+          cp -r backgrounds/. staging/backgrounds/
+          cp -r presets/. staging/presets/
+          cp "dist/${{ matrix.exe_name }}" staging/
+          cp packaging/fonts-README.txt staging/fonts/README.txt
+          cd staging
+          zip -r "../${{ matrix.artifact }}.zip" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip

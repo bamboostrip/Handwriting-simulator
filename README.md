@@ -314,6 +314,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 ```
 
+> 也可以直接在 GitHub Actions 中构建：推送 `v*` 标签或手动触发 `Build and Release` workflow（`.github/workflows/build.yml`），会自动在 Windows / Linux / macOS 三平台打包并组装便携 zip（exe + 预设 + 背景 + fonts 目录），打标签时自动发布到 Release。
+
 - 产物：`dist/HandWriteSim`（**单文件**，Windows 约 49 MB，Linux/macOS 体积相近）
 - 便携模式：首次运行自动创建 `fonts/`、`backgrounds/`、`presets/` 目录，把资源放进去即可，整个文件夹可随意拷贝
 - 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式），已按 `sys.platform` 跨平台适配：
