@@ -199,8 +199,9 @@ class Ui_Form(object):
 
         self.textEdit = QtWidgets.QTextEdit(panel)
         self.textEdit.setObjectName("textEdit")
-        self.textEdit.setMinimumHeight(90)
-        self.textEdit.setMaximumHeight(150)
+        # 文本输入区适当加大，便于一次录入大量文字
+        self.textEdit.setMinimumHeight(120)
+        self.textEdit.setMaximumHeight(200)
         v.addWidget(self.textEdit)
 
         # 字体 / 背景 文件选择
