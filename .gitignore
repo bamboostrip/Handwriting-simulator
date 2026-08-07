@@ -22,9 +22,6 @@ fonts/
 # 开发调试校验图片
 _*.png
 
-# 发布帖草稿（本地维护，不追踪）
-docs/52pj-发布帖.md
-
 # IDE
 .idea/
 .vscode/
