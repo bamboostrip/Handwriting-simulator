@@ -97,9 +97,13 @@ jobs:
           body: |
             ## 下载说明
 
-            每个平台提供两种产物：
-            - **单文件版**：`HandWriteSim-xxx`（单个可执行文件，拷贝即用）
-            - **便携包**：`HandWriteSim-xxx.zip`（可执行文件 + 预设 + 背景 + fonts 目录，推荐）
+            每个平台提供一个**便携 zip**（内含单文件可执行程序）：
+            - `HandWriteSim-windows-x86_64.zip`：Windows 版（内含 `HandWriteSim.exe`）
+            - `HandWriteSim-linux-x86_64.zip`：Linux 版
+            - `HandWriteSim-macos-arm64.zip`：macOS（Apple Silicon）版
+
+            解压后即可使用（无需安装）：可执行文件 + `presets/` 预设 + `backgrounds/` 背景 + `fonts/` 字体目录。
+            首次运行会自动创建缺失的 `fonts/`、`backgrounds/`、`presets/` 目录，整个文件夹可随意拷贝到任意位置。
 
             ### 为什么没有字体？
 
