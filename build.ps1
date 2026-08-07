@@ -1,11 +1,36 @@
-# Build the GUI as a Windows executable (onefile layout).
+# Build the GUI as a Windows executable (onefile) and package a portable zip.
 # Usage: powershell -ExecutionPolicy Bypass -File build.ps1
-# Output: dist/HandWriteSim.exe (single file, copy it anywhere)
+# Output:
+#   dist/HandWriteSim.exe                 (single file, copy it anywhere)
+#   dist/HandWriteSim-windows-x86_64.zip  (portable bundle:
+#                                          exe + presets + backgrounds + fonts dir,
+#                                          same layout as the GitHub Actions artifact)
 
-Remove-Item -Recurse -Force dist, build -ErrorAction SilentlyContinue
+$ErrorActionPreference = "Stop"
+
+$root = $PSScriptRoot
+$dist = Join-Path $root "dist"
+$staging = Join-Path $root "staging"
+
+Remove-Item -Recurse -Force $dist, (Join-Path $root "build") -ErrorAction SilentlyContinue
 
 uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 
+# 组装便携包：exe + 预设 + 背景 + fonts 目录（与 Actions 产物结构一致）
+Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$staging\fonts", "$staging\backgrounds", "$staging\presets" | Out-Null
+Copy-Item -Recurse (Join-Path $root "backgrounds\*") "$staging\backgrounds\"
+Copy-Item -Recurse (Join-Path $root "presets\*") "$staging\presets\"
+Copy-Item (Join-Path $dist "HandWriteSim.exe") "$staging\"
+Copy-Item (Join-Path $root "packaging\fonts-README.txt") "$staging\fonts\README.txt"
+
+$zip = Join-Path $dist "HandWriteSim-windows-x86_64.zip"
+Remove-Item $zip -ErrorAction SilentlyContinue
+Compress-Archive -Path "$staging\*" -DestinationPath $zip -Force
+Remove-Item -Recurse -Force $staging
+
 Write-Host ""
-Write-Host "Build finished: dist/HandWriteSim.exe (single file)"
-Write-Host "Copy the exe anywhere - no extra folders needed."
+Write-Host "Build finished:"
+Write-Host "  $dist\HandWriteSim.exe                 (single file, $(("{0:N1}" -f ((Get-Item (Join-Path $dist 'HandWriteSim.exe')).Length / 1MB))) MB)"
+Write-Host "  $zip  (portable bundle)"
+Write-Host "Copy the zip anywhere and extract - no extra steps needed."
