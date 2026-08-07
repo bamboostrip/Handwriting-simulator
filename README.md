@@ -15,7 +15,7 @@
 | 图像处理 | Pillow |
 | docx 解析 | python-docx |
 | 测试 | pytest |
-| 打包 | PyInstaller（onedir，`HandWriteSim.spec` + `build.ps1`） |
+| 打包 | PyInstaller（onefile 单文件，跨 Windows/macOS/Linux，`HandWriteSim.spec`） |
 
 ## 功能特性
 
@@ -33,7 +33,7 @@
 - **实时自动预览**：停止输入 300ms 后自动渲染，全程后台线程不卡界面；参数不完整时静默跳过
 - **多页预览**：上一页 / 下一页 / 页码指示，自动分页
 - **预览底色切换**：浅灰绿 / 深灰两档，背景图与底色撞色时可切换以区分边界
-- **预设系统**：保存 / 载入排版参数（JSON 格式，颜色为 `#RRGGBB`），旧版预设自动兼容
+- **预设系统**：预设文件夹（`presets/`）内预设可直接下拉切换，也支持保存 / 载入任意位置（JSON 格式，颜色为 `#RRGGBB`），旧版预设自动兼容
 - **一键导出**：全部页面导出为 `0.png`、`1.png`……到 `output/` 目录
 
 ### CLI（命令行）
@@ -55,7 +55,7 @@
 
 ## 环境要求与安装
 
-- 操作系统：Windows（开发与打包环境），代码本身跨平台
+- 操作系统：Windows / macOS / Linux（GUI 与打包均支持）
 - Python 3.12+（项目锁定 3.14）
 - 包管理器：[uv](https://docs.astral.sh/uv/)
 
@@ -91,6 +91,16 @@ uv run handwrite-gui
 ```
 
 操作流程：输入文字 → 选择字体 → 选择背景 → （可选）调整排版参数与颜色 → 点「预览」或直接「导出」。
+
+### 便携模式（推荐）
+
+exe 首次运行会自动在自身所在目录创建 `fonts/`、`backgrounds/`、`presets/` 三个文件夹：
+
+- `fonts/`：把字体文件（`.ttf` / `.ttc` / `.otf`）放进去，选择字体时默认打开此目录
+- `backgrounds/`：放背景图片，选择背景时默认打开此目录
+- `presets/`：放预设文件，界面上的预设下拉框会列出此目录内的预设，一键切换
+
+整个文件夹（exe + 资源目录）可以随意拷贝到任意位置，**所有相对路径都以 exe 所在目录为锚点**，无需修改任何路径。
 
 ### 命令行示例
 
@@ -190,11 +200,13 @@ Handwriting-simulator/
 ├── pyproject.toml               # 项目元数据、依赖声明、脚本入口、uv 依赖覆盖
 ├── uv.lock                      # 依赖锁定文件
 ├── .python-version              # Python 版本锁定（3.14）
-├── HandWriteSim.spec            # PyInstaller 打包配置（onedir）
+├── HandWriteSim.spec            # PyInstaller 打包配置（onefile，跨平台）
 ├── build.ps1                    # Windows 一键打包脚本
+├── backgrounds/                 # 内置背景素材（随仓库分发，可自行替换）
+├── presets/                     # 内置预设示例（JSON v2，相对路径引用资源）
+├── fonts/                       # 运行时自动创建，用户自备字体（版权字体不入库）
 ├── ui/                          # GUI 资源
-│   ├── 3d.ico                   # 窗口图标
-│   └── night.png
+│   └── 3d.ico                   # 窗口图标
 ├── docs/superpowers/            # 设计文档（段落化排版功能的设计与实现计划）
 │   ├── plans/
 │   └── specs/
@@ -203,21 +215,22 @@ Handwriting-simulator/
 │   ├── cli.py                   # 命令行入口（argparse）
 │   ├── core/                    # 核心逻辑层（不依赖任何 GUI 组件）
 │   │   ├── models.py            # HandwritingParams / Paragraph 数据模型、校验、序列化
+│   │   ├── paths.py             # 资产目录解析（exe 旁/项目根）与目录自动创建
 │   │   ├── engine.py            # 引擎门面：统一接口，默认 fast 后端，可切 handright
 │   │   ├── engine_fast.py       # FastEngine：numpy/scipy 高性能渲染
 │   │   ├── engine_handright.py  # HandrightEngine：handright 经典后端
 │   │   ├── docx_io.py           # docx 解析：段落对齐 + 首行缩进（含样式链继承）
-│   │   └── presets.py           # 预设读写：JSON v2 + 旧版文本兼容
+│   │   └── presets.py           # 预设读写：JSON v2 + 旧版文本兼容 + 相对路径双向转换
 │   └── gui/                     # 图形界面层
 │       ├── ui.py                # Qt 界面构建（纯控件 + 自动布局）
-│       ├── main_window.py       # 主窗口逻辑：参数映射、事件、预览降采样
+│       ├── main_window.py       # 主窗口逻辑：参数映射、事件、预览降采样、预设下拉切换
 │       ├── workers.py           # QThread 后台渲染 / 导出，信号回传结果
 │       └── resources.py         # 资源路径解析（开发 / PyInstaller 双环境）
 └── tests/                       # pytest 测试
     ├── test_docx_io.py          # docx 对齐与缩进解析
     ├── test_engine.py           # 引擎接口、校验、参数序列化
     ├── test_engine_fast.py      # FastEngine 渲染与段落路径
-    └── test_presets.py          # 预设读写、hex 颜色、新旧格式兼容
+    └── test_presets.py          # 预设读写、hex 颜色、相对路径往返、新旧格式兼容
 ```
 
 ### 分层约定
@@ -278,19 +291,43 @@ uv run pytest tests/test_presets.py -v
 
 功能开发遵循「先设计后编码」流程，相关设计文档位于 `docs/superpowers/specs/` 与 `docs/superpowers/plans/`（如段落化排版的设计与实现计划）。
 
+## 字体与版权
+
+**仓库不随包分发任何字体**：手写体多为商业版权字体（如汉呈、华阳、云江等字库），开源分发需授权，故请用户自备字体。推荐以下**开源 / 免费可商用**的手写体（下载后放入 `fonts/` 即可）：
+
+| 字体 | 协议 | 说明 |
+| --- | --- | --- |
+| 霞鹜文楷（LXGW WenKai） | OFL 1.1 | 开源可商用，最接近手写体观感 |
+| 沐瑶随心手写体 | 免费可商用 | 灵动手写风格 |
+| 站酷小薇 / 站酷快乐体 | 免费可商用 | 站酷字库出品 |
+| 内海字体（NeiHai） | 开源 | 手写圆体 |
+
+仓库内置的 `backgrounds/`（信纸、格子纸等）与 `presets/`（参数示例）均为原创素材，可自由使用与分发。
+
 ## 打包发布
 
 ```powershell
+# Windows
 powershell -ExecutionPolicy Bypass -File build.ps1
+
+# macOS / Linux（等价命令）
+uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 ```
 
-- 产物：`dist/HandWriteSim.exe`（**单文件**，约 49 MB）
-- 拷贝单个 exe 到任意位置即可运行，无需携带任何附加文件夹
-- 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式）：排除未使用的 scipy/PyQt6 模块瘦身（保留 scipy.ndimage 及其依赖链 special/linalg），Qt 插件按需收集（仅 png/jpeg/ico），剔除 Qt6Pdf/Qt6Svg/Qt6Network/opengl32sw 等未用组件，UI 资源（`ui/`）与 Qt 平台插件一并打入，窗口图标为 `ui/3d.ico`
-- 首次启动时 exe 会自解压到系统临时目录，启动稍慢属正常现象
+- 产物：`dist/HandWriteSim`（**单文件**，Windows 约 49 MB，Linux/macOS 体积相近）
+- 便携模式：首次运行自动创建 `fonts/`、`backgrounds/`、`presets/` 目录，把资源放进去即可，整个文件夹可随意拷贝
+- 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式），已按 `sys.platform` 跨平台适配：
+  - imageformats 插件按平台文件名收集（`qjpeg.dll` / `libqjpeg.so` / `libqjpeg.dylib`）
+  - 未使用 Qt DLL 的剔除清单仅 Windows 生效，其余平台保留避免启动失败
+  - 图标仅 Windows 支持 `.ico`，Linux/macOS 使用默认图标
+  - UPX 压缩仅非 macOS 平台启用（不破坏签名）
+- 首次启动时单文件会自解压到系统临时目录，启动稍慢属正常现象
 - 首次运行若被杀毒软件（如 Windows Defender）实时扫描拦截，等待扫描完成或将其加入白名单后即可正常启动（PyInstaller 单文件程序的共性现象，并非程序问题）
 
 ## 常见问题
+
+**为什么没有随包字体？**
+手写体多为商业版权字体，开源分发需授权，故仓库不提供字体。请自备字体放入 `fonts/` 目录，或从上方「字体与版权」章节的开源字体清单中下载。预设中的字体路径为占位（如 `fonts/云烟体.ttf`），对应的字体文件放入后即可使用，也可以直接改用其他字体。
 
 **为什么预览没有边界提示？**
 边界提示默认关闭，勾选「边界提示(仅预览)」后按边距参数在预览图上着色并绘制框线，可自定义提示颜色（`#RRGGBB`）。
