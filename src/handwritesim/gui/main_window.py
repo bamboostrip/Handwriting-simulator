@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
     def _choose_background(self) -> None:
         # 默认打开 exe 旁的 backgrounds/ 目录
         start_dir = str(Path(assets_root()) / "backgrounds")
-        path, _ = QFileDialog.getOpenFileName(self, "选择背景", start_dir, "图片 (*.png *.jpg *.jpeg *.bmp)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择背景", start_dir, "图片 (*.png *.jpg *.jpeg *.bmp *.webp)")
         if path:
             self._ui.lineEdit_2.setText(path)
 

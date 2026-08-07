@@ -2,7 +2,7 @@
   "version": 2,
   "params": {
     "font_path": "fonts/汉呈吴红生钢笔楷书.ttf",
-    "background_path": "backgrounds/红作文格子.jpg",
+    "background_path": "backgrounds/红作文格子.webp",
     "font_size": 150,
     "word_spacing": 28,
     "line_spacing": 141,

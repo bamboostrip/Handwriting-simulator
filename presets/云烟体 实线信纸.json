@@ -2,7 +2,7 @@
   "version": 2,
   "params": {
     "font_path": "fonts/云烟体.ttf",
-    "background_path": "backgrounds/实线信纸.jpg",
+    "background_path": "backgrounds/实线信纸.webp",
     "font_size": 140,
     "word_spacing": 0,
     "line_spacing": 97,

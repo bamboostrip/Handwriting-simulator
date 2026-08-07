@@ -20,8 +20,8 @@ uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 # 本地打包额外携带 fonts/ 下的字体（自用，版权字体不入库不上传）
 Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$staging\fonts", "$staging\backgrounds", "$staging\presets" | Out-Null
-# 背景压缩后组装（jpg quality 80，源素材保持原样），控制 zip 体积在 100MB（蓝奏云上限）以内
-uv run python (Join-Path $root "packaging\compress_backgrounds.py") "$staging\backgrounds\"
+# 背景源素材已统一为 webp（体积小质量高），直接拷贝
+Copy-Item -Recurse (Join-Path $root "backgrounds\*") "$staging\backgrounds\"
 Copy-Item -Recurse (Join-Path $root "presets\*") "$staging\presets\"
 Copy-Item (Join-Path $dist "HandWriteSim.exe") "$staging\"
 # 本地字体目录（存在则全部携带，供自用）

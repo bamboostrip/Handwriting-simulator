@@ -49,13 +49,13 @@ jobs:
         if: runner.os == 'macOS'
         run: codesign --force --deep -s - "dist/${{ matrix.exe_name }}"
 
-      # 组装便携包：exe + 预设 + 背景(压缩) + 空 fonts 目录（用户自备字体）
+      # 组装便携包：exe + 预设 + 背景(webp) + 空 fonts 目录（用户自备字体）
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "staging/fonts", "staging/backgrounds", "staging/presets" | Out-Null
-          uv run python "packaging/compress_backgrounds.py" "staging/backgrounds/"
+          Copy-Item -Recurse "backgrounds/*" "staging/backgrounds/"
           Copy-Item -Recurse "presets/*" "staging/presets/"
           Copy-Item "dist/${{ matrix.exe_name }}" "staging/"
           Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
@@ -67,7 +67,7 @@ jobs:
         run: |
           set -e
           mkdir -p staging/fonts staging/backgrounds staging/presets
-          uv run python packaging/compress_backgrounds.py staging/backgrounds/
+          cp -r backgrounds/. staging/backgrounds/
           cp -r presets/. staging/presets/
           cp "dist/${{ matrix.exe_name }}" staging/
           cp packaging/fonts-README.txt staging/fonts/README.txt

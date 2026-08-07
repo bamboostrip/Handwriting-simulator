@@ -46,8 +46,9 @@ for _sub in (
 
 # imageformats 按需收集，文件名随平台不同：
 # Windows: qjpeg.dll / qico.dll；Linux: libqjpeg.so；macOS: libqjpeg.dylib。
-# PNG 为 Qt 内置格式无需插件；qico 仅 Windows 需要（ico 窗口图标）。
-_keep_images = {"qjpeg"}
+# PNG 为 Qt 内置格式无需插件；qico 仅 Windows 需要（ico 窗口图标）；
+# qwebp 用于 webp 背景（内置背景素材已统一为 webp 格式）。
+_keep_images = {"qjpeg", "qwebp"}
 if _IS_WIN:
     _keep_images.add("qico")
 

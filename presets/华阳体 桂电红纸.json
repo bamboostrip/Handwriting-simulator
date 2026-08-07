@@ -2,7 +2,7 @@
   "version": 2,
   "params": {
     "font_path": "fonts/华阳手写体.ttf",
-    "background_path": "backgrounds/A4纯白.jpg",
+    "background_path": "backgrounds/A4纯白.webp",
     "font_size": 120,
     "word_spacing": 0,
     "line_spacing": 90,
