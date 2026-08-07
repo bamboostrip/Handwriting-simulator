@@ -63,3 +63,49 @@ def test_style_inherited_indent(tmp_path):
     doc.save(path)
     paras = load_paragraphs(path)
     assert paras[0].first_line_indent > 0
+
+
+def test_first_line_twips_follows_doc_font_size(tmp_path):
+    """Word/WPS 把“首行缩进 2 字符”存成固定值 firstLine（480twips=12pt 的 2 字符）
+    时不写 firstLineChars，应按文档字号还原为字符数再随渲染字号缩放。
+
+    回归：曾按 96dpi 固定换算成 32px，渲染字号大时缩进明显偏小，
+    用户二季度文档（仅 firstLine=480）导入后看起来没有首行缩进。
+    """
+    doc = Document()
+    p = doc.add_paragraph()
+    p.paragraph_format.first_line_indent = Pt(24)  # 等价 firstLine=480 twips
+    p.add_run("现将有关事项通知如下。").font.size = Pt(12)  # 文档字号小四
+    path = tmp_path / "twips.docx"
+    doc.save(path)
+    paras = load_paragraphs(path, font_size=140)
+    assert paras[0].first_line_indent == 280  # 2 字符 × 140
+
+
+def test_first_line_twips_fallback_style_font(tmp_path):
+    """段落无 run 字号时，按样式/Normal 字号换算（24pt / 12pt = 2 字符）。"""
+    doc = Document()
+    doc.styles["Normal"].font.size = Pt(12)
+    p = doc.add_paragraph("现将有关事项通知如下。")
+    p.paragraph_format.first_line_indent = Pt(24)
+    path = tmp_path / "twips_style.docx"
+    doc.save(path)
+    paras = load_paragraphs(path, font_size=140)
+    assert paras[0].first_line_indent == 280
+
+
+def test_first_line_chars_takes_priority(tmp_path):
+    """存在 firstLineChars 时优先按字符数，忽略 firstLine 固定值。"""
+    doc = Document()
+    p = doc.add_paragraph("现将有关事项通知如下。")
+    p.paragraph_format.first_line_indent = Pt(24)  # 固定值分支会算出不同结果
+    pPr = p._p.get_or_add_pPr()
+    ind = pPr.find(qn("w:ind"))
+    if ind is None:
+        ind = pPr.makeelement(qn("w:ind"), {})
+        pPr.append(ind)
+    ind.set(qn("w:firstLineChars"), "200")
+    path = tmp_path / "both.docx"
+    doc.save(path)
+    paras = load_paragraphs(path, font_size=140)
+    assert paras[0].first_line_indent == 280
