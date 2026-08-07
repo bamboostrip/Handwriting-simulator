@@ -1,22 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置（onefile 单文件模式，便于分发）。
 
-打包产物为单个 HandWriteSim.exe，运行时自解压到临时目录，
+打包产物为单个 HandWriteSim 可执行文件，运行时自解压到临时目录，
 无需携带 _internal 等附加文件夹，单文件即可拷贝分发。
-UI 资源（ui/3d.ico）一并打入，窗口图标直接嵌入 exe。
+UI 资源（ui/3d.ico）一并打入，窗口图标直接嵌入可执行文件。
+
+跨平台：通过 sys.platform 分支适配三平台差异——
+- imageformats 插件文件名随平台不同（qjpeg.dll / libqjpeg.so / libqjpeg.dylib）
+- 未使用 Qt DLL 的剔除清单仅 Windows 实测可安全移除，其余平台保留
+- 图标仅 Windows 支持 .ico，Linux/macOS 不指定（用默认图标）
 
 体积优化：
 - excludes 排除 PyInstaller hook 全量收集的未使用模块（scipy 仅用 ndimage
   及其依赖链 special/linalg；PyQt6 仅用 QtCore/QtGui/QtWidgets）
 - Qt 平台插件按需收集，imageformats 只保留 png/jpeg/ico
-- 剔除未使用的 Qt6Pdf/Qt6Svg DLL 与 opengl32sw 软件渲染器
+- Windows 下剔除未使用的 Qt6Pdf/Qt6Svg DLL 与 opengl32sw 软件渲染器
   （QWidgets 光栅渲染不需要 OpenGL）
 """
 import os
+import sys
 
 import PyQt6
 from PyInstaller.building.datastruct import TOC
 from PyInstaller.utils.hooks import collect_submodules
+
+_IS_WIN = sys.platform.startswith("win")
+_IS_MAC = sys.platform == "darwin"
 
 # Qt6 根目录（spec 由 PyInstaller 在项目 venv 中执行，PyQt6 已安装）
 _qt_root = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6")
@@ -25,8 +34,8 @@ _qt_root = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6")
 # 必须显式加入，否则 GUI 无法启动）
 datas = [("ui", "ui")]
 for _sub in (
-    "plugins/platforms",   # qwindows 窗口平台（必需）
-    "plugins/styles",      # qmodernwindowsstyle 界面样式
+    "plugins/platforms",   # 窗口平台插件（qwindows/libqxcb/libqcocoa）
+    "plugins/styles",      # 界面样式
     "plugins/generic",     # 触摸支持
     "plugins/tls",         # 网络 TLS 后端
 ):
@@ -34,14 +43,30 @@ for _sub in (
     if os.path.isdir(_src):
         datas.append((_src, os.path.join("PyQt6", "Qt6", _sub)))
 
-# imageformats 按需收集：qpng（预览）、qjpeg（JPEG 背景）、qico（窗口图标），
-# 其余（gif/webp/tiff/pdf/svg 等）体积大且用不到，不收集
+# imageformats 按需收集，文件名随平台不同：
+# Windows: qjpeg.dll / qico.dll；Linux: libqjpeg.so；macOS: libqjpeg.dylib。
+# PNG 为 Qt 内置格式无需插件；qico 仅 Windows 需要（ico 窗口图标）。
+_keep_images = {"qjpeg"}
+if _IS_WIN:
+    _keep_images.add("qico")
+
+
+def _img_stem(name: str) -> str:
+    """qjpeg.dll / libqjpeg.so / libqjpeg.dylib -> qjpeg。"""
+    base = name.split(".")[0]
+    return base[3:] if base.startswith("lib") else base
+
+
 _img_dir = os.path.join(_qt_root, "plugins", "imageformats")
 if os.path.isdir(_img_dir):
-    for _name in ("qpng.dll", "qjpeg.dll", "qico.dll"):
-        _file = os.path.join(_img_dir, _name)
-        if os.path.isfile(_file):
-            datas.append((_file, os.path.join("PyQt6", "Qt6", "plugins", "imageformats")))
+    for _name in os.listdir(_img_dir):
+        if _img_stem(_name) in _keep_images:
+            datas.append(
+                (
+                    os.path.join(_img_dir, _name),
+                    os.path.join("PyQt6", "Qt6", "plugins", "imageformats"),
+                )
+            )
 
 # 未使用模块排除清单：
 # - scipy 仅使用 ndimage，排除其余子模块
@@ -88,17 +113,20 @@ a = Analysis(
 # - Qt6Pdf（PDF 模块）、Qt6Svg（SVG 模块）
 # - opengl32sw（Qt 软件 OpenGL 渲染器，QWidgets 光栅渲染不需要）
 # - Qt6Network（本应用不用网络；若 Qt6Gui 链接它则启动会失败，已实测可移除）
-a.binaries = TOC(
-    (name, path, typecode)
-    for name, path, typecode in a.binaries
-    if os.path.basename(name)
-    not in ("Qt6Pdf.dll", "Qt6Svg.dll", "opengl32sw.dll", "Qt6Network.dll",
-            "libssl-3-x64.dll", "libcrypto-3-x64.dll")
-)
+# 注意：仅 Windows 实测可安全移除（文件名固定为 *.dll）；Linux/macOS 的
+# 动态链接关系未经实测，保留原文件避免启动失败。
+if _IS_WIN:
+    a.binaries = TOC(
+        (name, path, typecode)
+        for name, path, typecode in a.binaries
+        if os.path.basename(name)
+        not in ("Qt6Pdf.dll", "Qt6Svg.dll", "opengl32sw.dll", "Qt6Network.dll",
+                "libssl-3-x64.dll", "libcrypto-3-x64.dll")
+    )
 
 # hook 默认全量收集 Qt 插件（imageformats 十余个、iconengines 等），
 # 按需过滤：iconengines 全删（依赖已移除的 Qt6Svg），
-# imageformats 只留 qjpeg/qico（PNG 为 Qt 内置格式无需插件）
+# imageformats 只留 jpeg（Windows 另加 ico；PNG 为 Qt 内置格式无需插件）
 def _keep_qt_plugins(name: str) -> bool:
     """按需保留 Qt 插件，返回 False 表示剔除。"""
     if "plugins" not in name:
@@ -106,7 +134,7 @@ def _keep_qt_plugins(name: str) -> bool:
     if "iconengines" in name:
         return False
     if "imageformats" in name:
-        return os.path.basename(name) in ("qjpeg.dll", "qico.dll")
+        return _img_stem(os.path.basename(name)) in _keep_images
     return True
 
 
@@ -129,8 +157,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX 压缩会破坏 macOS 签名，非 macOS 平台可用（未安装 upx 时自动跳过）
+    upx=not _IS_MAC,
     console=False,
     disable_windowed_traceback=False,
-    icon="ui/3d.ico",
+    # 图标仅 Windows 支持 .ico；Linux/macOS 不指定（PyInstaller 默认图标）
+    icon="ui/3d.ico" if _IS_WIN else None,
 )
