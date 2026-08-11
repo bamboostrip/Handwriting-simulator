@@ -7,9 +7,11 @@ GUI 与 CLI 均复用本模块。
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Iterator
 
+import img2pdf
 from PIL import Image
 
 from .engine_fast import FastEngine
@@ -40,3 +42,23 @@ class HandwritingEngine:
     def save_all(self, params: HandwritingParams, out_dir: str | Path) -> list[Path]:
         """将全部手写图导出到 out_dir，返回生成的文件路径列表。"""
         return self._impl.save_all(params, out_dir)
+
+    def save_pdf(self, params: HandwritingParams, out_path: str | Path, dpi: float = 300.0) -> Path:
+        """将全部手写页导出为 PDF（位图层方案）。
+
+        与 Rust 版 printpdf 导出一致：页物理尺寸 = 像素 @ dpi（默认 300 DPI）；
+        每页 PNG 以 pHYs DPI 元数据嵌入，img2pdf 无损直嵌（Flate），
+        视觉与 PNG 导出逐像素一致。返回输出文件路径。
+        """
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            png_paths: list[Path] = []
+            for index, image in enumerate(self.generate(params)):
+                png = Path(tmp) / f"{index}.png"
+                image.save(png, dpi=(dpi, dpi))
+                png_paths.append(png)
+            if not png_paths:
+                raise RuntimeError("未生成任何页面")
+            out_path.write_bytes(img2pdf.convert(png_paths))
+        return out_path

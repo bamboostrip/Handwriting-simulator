@@ -3,6 +3,7 @@
 示例：
     handwrite-cli "你好世界" --font C:/Windows/Fonts/msyh.ttc --out output
     handwrite-cli "多页文本" --font f.ttf --background bg.png --font-size 40
+    handwrite-cli "多页文本" --font f.ttf --background bg.png --pdf output.pdf
     handwrite-cli --preset preset.json "文本" --out output
 """
 
@@ -35,6 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preset", default="", help="载入预设文件 (.json/.txt)")
     parser.add_argument("--save-preset", default="", help="生成后保存当前参数为预设 (.json)")
     parser.add_argument("--preview-only", action="store_true", help="仅预览第一张并保存")
+    parser.add_argument("--pdf", default="", help="导出 PDF 到指定文件（替代图片导出）")
 
     # 排版
     parser.add_argument("--font-size", type=int, default=36)
@@ -122,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
             out.parent.mkdir(parents=True, exist_ok=True)
             image.convert("RGB").save(out)
             print(f"预览已保存：{out}")
+        elif args.pdf:
+            out = engine.save_pdf(params, args.pdf)
+            print(f"已导出 PDF：{out.resolve()}")
         else:
             files = engine.save_all(params, args.out)
             print(f"已导出 {len(files)} 张图片到：{Path(args.out).resolve()}")

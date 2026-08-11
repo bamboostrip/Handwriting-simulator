@@ -379,6 +379,11 @@ class Ui_Form(object):
         self.pushButton_5.setProperty("primary", True)
         self.pushButton_5.setMinimumHeight(34)
         row_btn.addWidget(self.pushButton_5, 1)
+        self.pushButton_7 = QtWidgets.QPushButton(panel)
+        self.pushButton_7.setObjectName("pushButton_7")
+        self.pushButton_7.setProperty("primary", True)
+        self.pushButton_7.setMinimumHeight(34)
+        row_btn.addWidget(self.pushButton_7, 1)
         right_col.addLayout(row_btn)
 
         Form.setStyleSheet(_LIGHT_QSS)
@@ -439,3 +444,4 @@ class Ui_Form(object):
         self.lineEdit_6.setPlaceholderText("30")
         self.pushButton_3.setText(_translate("Form", "预览"))
         self.pushButton_5.setText(_translate("Form", "导出"))
+        self.pushButton_7.setText(_translate("Form", "导出 PDF"))

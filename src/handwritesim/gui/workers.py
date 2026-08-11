@@ -18,7 +18,7 @@ from PIL import ImageQt
 from ..core.engine import HandwritingEngine
 from ..core.models import HandwritingParams
 
-Mode = Literal["preview", "export"]
+Mode = Literal["preview", "export", "pdf"]
 
 
 def _bounds_overlay(
@@ -52,6 +52,7 @@ class RenderWorker(QThread):
         params: HandwritingParams,
         mode: Mode,
         out_dir: str | Path = "output",
+        out_pdf: str | Path = "",
         parent=None,
         bounds: tuple[int, int, int] | None = None,
         seed: object | None = None,
@@ -60,6 +61,7 @@ class RenderWorker(QThread):
         self._params = params
         self._mode = mode
         self._out_dir = out_dir
+        self._out_pdf = out_pdf
         self._bounds = bounds
         self._seed = seed
 
@@ -79,6 +81,9 @@ class RenderWorker(QThread):
                     pixmaps.append(ImageQt.toqpixmap(im))
                 self.preview_ready.emit(pixmaps)
                 self.succeeded.emit([])
+            elif self._mode == "pdf":
+                files = [str(engine.save_pdf(self._params, self._out_pdf))]
+                self.succeeded.emit(files)
             else:
                 files = engine.save_all(self._params, self._out_dir)
                 self.succeeded.emit([str(f) for f in files])

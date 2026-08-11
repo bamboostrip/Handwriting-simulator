@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         ui.pushButton_2.clicked.connect(self._choose_background)
         ui.pushButton_3.clicked.connect(self._on_preview)
         ui.pushButton_5.clicked.connect(self._on_export)
+        ui.pushButton_7.clicked.connect(self._on_export_pdf)
         ui.pushButton_4.clicked.connect(self._on_save_preset)
         ui.pushButton_6.clicked.connect(self._on_load_preset)
         ui.combo_preset.currentIndexChanged.connect(self._on_preset_combo_changed)
@@ -373,6 +374,21 @@ class MainWindow(QMainWindow):
             return
         self._start_worker(params, "export", seed=self._preview_seed)
 
+    def _on_export_pdf(self) -> None:
+        # 与图片导出相同：复用最后一次预览的参数与种子，保证与预览一致
+        params = self._preview_params if self._preview_params is not None else self.collect_params()
+        try:
+            params.validate(require_text=True)
+        except HandwritingParams.ValidationError as exc:
+            QMessageBox.information(self, "参数检查", str(exc))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 PDF", str(self._out_dir / "handwrite.pdf"), "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        self._start_worker(params, "pdf", seed=self._preview_seed, out_pdf=path)
+
     def _on_save_preset(self) -> None:
         # 默认保存到 exe 旁的 presets/ 目录，文件名可自行编辑
         default_path = str(Path(assets_root()) / "presets" / "preset.json")
@@ -498,7 +514,12 @@ class MainWindow(QMainWindow):
     # 后台任务
     # ------------------------------------------------------------------
     def _start_worker(
-        self, params: HandwritingParams, mode: str, quiet: bool = False, seed: object | None = None
+        self,
+        params: HandwritingParams,
+        mode: str,
+        quiet: bool = False,
+        seed: object | None = None,
+        out_pdf: str | Path = "",
     ) -> bool:
         """启动后台任务；worker 忙时跳过并返回 False（调用方据此决定是否记录状态）。"""
         if self._worker is not None and self._worker.isRunning():
@@ -510,7 +531,9 @@ class MainWindow(QMainWindow):
         ui = self._ui
         if mode == "preview" and ui.checkBox_bounds.isChecked():
             bounds = self._color_of(ui.lineEdit_13, (76, 166, 166))
-        worker = RenderWorker(params, mode, self._out_dir, bounds=bounds, seed=seed)
+        worker = RenderWorker(
+            params, mode, self._out_dir, out_pdf=out_pdf, bounds=bounds, seed=seed
+        )
         worker.succeeded.connect(self._on_success)
         worker.preview_ready.connect(self._on_preview_ready)
         worker.failed.connect(self._on_failure)
@@ -529,6 +552,7 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         self._ui.pushButton_3.setEnabled(not busy)
         self._ui.pushButton_5.setEnabled(not busy)
+        self._ui.pushButton_7.setEnabled(not busy)
 
     def _on_preview_ready(self, pages) -> None:
         # 预览全部页已生成，重置到第一页并刷新
@@ -581,7 +605,10 @@ class MainWindow(QMainWindow):
     def _on_success(self, files: list[str]) -> None:
         self._set_busy(False)
         if files:
-            QMessageBox.information(self, "完成", f"已导出 {len(files)} 张图片到 {self._out_dir} 目录")
+            if Path(files[0]).suffix.lower() == ".pdf":
+                QMessageBox.information(self, "完成", f"PDF 已导出：{files[0]}")
+            else:
+                QMessageBox.information(self, "完成", f"已导出 {len(files)} 张图片到 {self._out_dir} 目录")
         # 预览场景无需额外提示
 
     def _on_failure(self, message: str) -> None:

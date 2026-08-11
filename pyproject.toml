@@ -5,6 +5,7 @@ description = "手写模拟器 - 基于 handright 的手写体生成工具（GUI
 requires-python = ">=3.12"
 dependencies = [
     "handright==8.2.0",
+    "img2pdf>=0.6.3",
     "numpy>=2.5.1",
     "pillow>=11,<13",
     "PyQt6>=6.6",
