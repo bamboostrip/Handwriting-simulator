@@ -93,7 +93,14 @@ class MainWindow(QMainWindow):
         ui.btn_prev.clicked.connect(self._prev_page)
         ui.btn_next.clicked.connect(self._next_page)
         ui.btn_preview_bg.clicked.connect(self._toggle_preview_bg)
+        # 写错字：滑块数值同步到百分比标签
+        ui.miswrite_rate_slider.valueChanged.connect(self._update_miswrite_rate_label)
+        self._update_miswrite_rate_label(ui.miswrite_rate_slider.value())
         self._connect_auto_preview()
+
+    def _update_miswrite_rate_label(self, value: int) -> None:
+        """滑块值（0~300）同步为百分比显示（0.0%~30.0%）。"""
+        self._ui.label_miswrite_rate_value.setText(f"{value / 10.0:.1f}%")
 
     def _connect_auto_preview(self) -> None:
         """文本或任意参数变化时防抖自动预览（参数不完整时静默跳过）。
@@ -128,6 +135,9 @@ class MainWindow(QMainWindow):
             w.valueChanged.connect(start)
         ui.doubleSpinBox_6.valueChanged.connect(start)  # 笔画旋转
         ui.checkBox_bounds.toggled.connect(start)       # 边界提示开关
+        ui.miswrite_rate_slider.valueChanged.connect(start)   # 错字率
+        ui.miswrite_mode_combo.currentIndexChanged.connect(start)   # 重写方式
+        ui.miswrite_style_combo.currentIndexChanged.connect(start)  # 涂改方式
 
     # ------------------------------------------------------------------
     # 富文本排版工具
@@ -234,6 +244,11 @@ class MainWindow(QMainWindow):
         p.left_margin = self._int_of(ui.lineEdit_5, p.left_margin)
         p.right_margin = self._int_of(ui.lineEdit_6, p.right_margin)
         p.bottom_margin = self._int_of(ui.lineEdit_4, p.bottom_margin)
+        p.miswrite_rate = ui.miswrite_rate_slider.value() / 1000.0
+        p.miswrite_rewrite_mode = ("above", "rewrite")[ui.miswrite_mode_combo.currentIndex()]
+        p.miswrite_strikeout_style = ("line", "double_line", "slash", "cross")[
+            ui.miswrite_style_combo.currentIndex()
+        ]
         return p
 
     def _collect_paragraphs(self):
@@ -293,6 +308,11 @@ class MainWindow(QMainWindow):
         ui.lineEdit_5.setText(str(p.left_margin))
         ui.lineEdit_6.setText(str(p.right_margin))
         ui.lineEdit_4.setText(str(p.bottom_margin))
+        ui.miswrite_rate_slider.setValue(round(p.miswrite_rate * 1000))
+        ui.miswrite_mode_combo.setCurrentIndex(0 if p.miswrite_rewrite_mode == "above" else 1)
+        ui.miswrite_style_combo.setCurrentIndex(
+            ("line", "double_line", "slash", "cross").index(p.miswrite_strikeout_style)
+        )
 
     @staticmethod
     def _int_of(widget, default: int) -> int:

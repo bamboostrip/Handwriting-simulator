@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 from pathlib import Path
 from typing import Iterator, Tuple
@@ -25,6 +26,21 @@ from .models import HandwritingParams, Paragraph
 
 # 4-连通邻域结构
 _CONNECTIVITY = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
+
+# 错字候选常用汉字表（与 Rust 版 layout.rs 一致）
+_COMMON_CHINESE_CHARS = (
+    "的一是在了不和有大这主中人国为以我分们行"
+    "产作本经发社工己等均部样出名家理"
+    "学对里后小多下心然事资力么得之"
+    "都平因起只没生量建长现前性那系"
+    "各进最及外治与公向情老正路解"
+    "问反政化无其期高强使教定重特立"
+    "体代通度意见指表命战民保机关党"
+    "议写论设合名同由接收改新想打放"
+    "儿加用及那此实决求美品书"
+    "要法务制清"
+    "楚确认真各委局厅所"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +60,169 @@ def _char_offset(
     offset = font.getbbox(ch)[2] - font.getbbox(ch)[0]
     offset_cache[key] = offset
     return offset
+
+
+def _wrong_char(ch: str, rand: random.Random) -> str:
+    """生成一个与原字符不同的错字（与 Rust 版 get_wrong_char 一致）。
+
+    汉字从常用字表随机取；ASCII 大写/小写/数字各自随机异字；
+    其他字符（标点等）原样保留（仍会画删除线）。
+    """
+    if "A" <= ch <= "Z":
+        wrong = ch
+        while wrong == ch:
+            wrong = chr(ord("A") + rand.randrange(26))
+        return wrong
+    if "a" <= ch <= "z":
+        wrong = ch
+        while wrong == ch:
+            wrong = chr(ord("a") + rand.randrange(26))
+        return wrong
+    if "0" <= ch <= "9":
+        wrong = ch
+        while wrong == ch:
+            wrong = chr(ord("0") + rand.randrange(10))
+        return wrong
+    if "\u4e00" <= ch <= "\u9fa5":
+        wrong = ch
+        while wrong == ch:
+            wrong = _COMMON_CHINESE_CHARS[rand.randrange(len(_COMMON_CHINESE_CHARS))]
+        return wrong
+    return ch
+
+
+def _bezier_strike(draw: ImageDraw.ImageDraw, rng: random.Random, x0: float, y0: float,
+                   x1: float, y1: float, thickness: int, waviness: float) -> None:
+    """画一条带随机弧度的二次贝塞尔删除线段（与 Rust 版 draw_bezier_line 一致）。
+
+    控制点取中点沿法线偏移 waviness，5 段折线一次 draw.line 绘制（C 层执行）。
+    """
+    mx = (x0 + x1) / 2.0
+    my = (y0 + y1) / 2.0
+    dx = x1 - x0
+    dy = y1 - y0
+    length = max(math.hypot(dx, dy), 1.0)
+    nx = -dy / length
+    ny = dx / length
+    offset = 0.0 if waviness <= 0.0 else rng.uniform(-waviness, waviness)
+    cx = mx + nx * offset
+    cy = my + ny * offset
+    points = [(x0, y0)]
+    for step in range(1, 6):
+        t = step / 5.0
+        mt = 1.0 - t
+        points.append((mt * mt * x0 + 2.0 * mt * t * cx + t * t * x1,
+                       mt * mt * y0 + 2.0 * mt * t * cy + t * t * y1))
+    draw.line(points, fill=1, width=thickness)
+
+
+def _draw_strikeout(draw: ImageDraw.ImageDraw, rng: random.Random, x: float, y_top: float,
+                    size: int, wrong_advance: int, angle: float, style: str, ascent: int) -> None:
+    """对错字字符绘制删除线（与 Rust 版 draw_miswrite 一致）。
+
+    y_top 为该字符的行顶坐标；angle 为删除线倾角（rad）；粗细/弧度参数
+    直接移植 Rust 的调参结果：厚度 max(size*0.035, 1.5)、波动 size*0.08。
+    """
+    mid_x = x + wrong_advance / 2.0
+    mid_y = y_top + ascent * 0.45
+    ct = math.cos(angle)
+    st = math.sin(angle)
+    half_w = wrong_advance * 0.55
+    half_h = size * 0.4
+    thickness = max(round(size * 0.035), 2)
+    waviness = size * 0.08
+    if style in ("line", "double_line"):
+        rx = half_w * ct
+        ry = half_w * st
+        _bezier_strike(draw, rng, mid_x - rx, mid_y - ry, mid_x + rx, mid_y + ry, thickness, waviness)
+        if style == "double_line":
+            offset_y = size * 0.1
+            _bezier_strike(draw, rng, mid_x - rx, mid_y - ry - offset_y,
+                           mid_x + rx, mid_y + ry - offset_y, thickness, waviness)
+            _bezier_strike(draw, rng, mid_x - rx, mid_y - ry + offset_y,
+                           mid_x + rx, mid_y + ry + offset_y, thickness, waviness)
+    elif style == "slash":
+        _bezier_strike(draw, rng, mid_x + half_w * 0.7, mid_y - half_h,
+                       mid_x - half_w * 0.7, mid_y + half_h, thickness, waviness)
+    else:  # cross
+        _bezier_strike(draw, rng, mid_x - half_w * 0.7, mid_y - half_h,
+                       mid_x + half_w * 0.7, mid_y + half_h, thickness, waviness)
+        _bezier_strike(draw, rng, mid_x + half_w * 0.7, mid_y - half_h,
+                       mid_x - half_w * 0.7, mid_y + half_h, thickness, waviness)
+
+
+# 参照字“十”（横竖各一）用于测量笔画粗细；(字体路径, 字号) -> 笔画宽度
+_STROKE_PROBE_CHAR = "十"
+_stroke_width_cache: dict[tuple[str, int], float] = {}
+
+
+def _stroke_width(font: ImageFont.FreeTypeFont) -> float:
+    """测量字体在 font.size 下的笔画宽度（像素），按 (路径, 字号) 缓存。
+
+    用距离变换取笔画中轴像素到背景距离的两倍（90 分位数抗边缘杂点）。
+    """
+    size = font.size
+    key = (font.path, size)
+    cached = _stroke_width_cache.get(key)
+    if cached is not None:
+        return cached
+    probe_size = size * 2
+    probe = ImageFont.truetype(font.path, size=size)
+    img = Image.new("1", (probe_size, probe_size), 0)
+    ImageDraw.Draw(img).text((size // 2, size // 2), _STROKE_PROBE_CHAR, fill=1, font=probe)
+    arr = np.asarray(img, dtype=bool)
+    if not arr.any():
+        width = max(size * 0.035, 1.5)
+    else:
+        dist = ndimage.distance_transform_edt(arr)
+        width = 2.0 * float(np.percentile(dist[arr], 90))
+    _stroke_width_cache[key] = width
+    return width
+
+
+def _paste_thickened_char(draw: ImageDraw.ImageDraw, x: float, y: float, text: str,
+                          small_font: ImageFont.FreeTypeFont,
+                          full_font: ImageFont.FreeTypeFont) -> None:
+    """按原字号笔画粗细绘制小字重写（模拟同一支笔）。
+
+    小字号字形的笔画随字号等比变细，先把小字画到临时画布，
+    再按（原笔画 - 小字笔画）/2 的半径膨胀补齐后贴回。
+    """
+    radius = (_stroke_width(full_font) - _stroke_width(small_font)) / 2.0
+    if radius < 0.5:
+        draw.text((round(x), round(y)), text, fill=1, font=small_font)
+        return
+    r = round(radius)
+    pad = r + 4
+    w = math.ceil(small_font.getlength(text)) + 2 * pad
+    ascent, descent = small_font.getmetrics()
+    h = ascent + descent + 2 * pad
+    temp = Image.new("1", (w, h), 0)
+    ImageDraw.Draw(temp).text((pad, pad), text, fill=1, font=small_font)
+    # 菱形结构：只沿横竖方向加粗，避免方形膨胀把密集小字的近邻笔画糊成一片
+    ys, xs = np.indices((2 * r + 1, 2 * r + 1)) - r
+    structure = np.abs(ys) + np.abs(xs) <= r
+    arr = ndimage.binary_dilation(np.asarray(temp, dtype=bool), structure=structure)
+    draw.bitmap((round(x) - pad, round(y) - pad), Image.fromarray(arr), fill=1)
+
+
+def _draw_miswrite(draw: ImageDraw.ImageDraw, rng: random.Random, x: float, y_top: float,
+                   size: int, wrong_advance: int, angle: float, style: str,
+                   font: ImageFont.FreeTypeFont, correct_ch: str, draw_small: bool,
+                   resolve_font, offset_cache: dict[tuple[int, int], int]) -> None:
+    """画删除线；draw_small 时在正上方略偏右补画小一号重写（Above 模式）。"""
+    ascent = font.getmetrics()[0]
+    _draw_strikeout(draw, rng, x, y_top, size, wrong_advance, angle, style, ascent)
+    if draw_small:
+        small_size = max(round(size * 0.6), 1)
+        small_font = resolve_font(small_size)
+        ascent_small = small_font.getmetrics()[0]
+        rx = rng.uniform(-size * 0.03, size * 0.03)
+        ry = rng.uniform(-size * 0.03, size * 0.03)
+        small_x = x + wrong_advance * 0.45 + rx
+        small_baseline = max(y_top - size * 0.45 + ascent_small + ry, ascent_small)
+        _paste_thickened_char(draw, small_x, small_baseline - ascent_small,
+                              correct_ch, small_font, font)
 
 
 def _layout_page(
@@ -78,6 +257,12 @@ def _layout_page(
 
     font_size_int = int(font_size)
 
+    # 错字参数提前解包（循环内避免属性查找）
+    miswrite_rate = params.miswrite_rate
+    miswrite_active = miswrite_rate > 0
+    mode = params.miswrite_rewrite_mode
+    strikeout_style = params.miswrite_strikeout_style
+
     def resolve_font(size: int) -> ImageFont.FreeTypeFont:
         if size not in font_cache:
             font_cache[size] = (
@@ -101,16 +286,36 @@ def _layout_page(
             if x > width - right - font_size and ch not in end_chars:
                 break
 
-            xy = (round(x), round(rand.gauss(y, params.line_spacing_sigma)))
+            yj = round(rand.gauss(y, params.line_spacing_sigma))
             font = base_font
             size = font_size_int
             if params.font_size_sigma:
                 size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
                 if size != font_size:
                     font = resolve_font(size)
-            draw.text(xy, ch, fill=1, font=font)
-            offset = _char_offset(offset_cache, size, ch, font)
-            x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
+            word_noise = rand.gauss(0, params.word_spacing_sigma)
+            # 写错字模拟：判定只影响渲染，不参与换行；rate=0 时不消耗 RNG（零回归）
+            miswrite = False
+            if miswrite_active and rand.random() < miswrite_rate:
+                miswrite = True
+                wrong_ch = _wrong_char(ch, rand)
+                angle = rand.gauss(0, 0.15)
+                local_seed = rand.getrandbits(64)
+            drawn_ch = wrong_ch if miswrite else ch
+            draw.text((round(x), yj), drawn_ch, fill=1, font=font)
+            offset = _char_offset(offset_cache, size, drawn_ch, font)
+            char_x = x
+            x += params.word_spacing + offset + word_noise
+            if miswrite:
+                local = random.Random(local_seed)
+                _draw_miswrite(
+                    draw, local, char_x, yj, size, offset, angle,
+                    strikeout_style, font, ch, mode == "above",
+                    resolve_font, offset_cache,
+                )
+                if mode == "rewrite":
+                    draw.text((round(x), yj), ch, fill=1, font=font)
+                    x += _char_offset(offset_cache, size, ch, font) + params.word_spacing
 
             i += 1
             if i >= text_len:
@@ -132,29 +337,6 @@ def _split_text_rows(rows: np.ndarray) -> list[tuple[int, int]]:
     if start is not None:
         groups.append((start, len(rows)))
     return groups
-
-
-def _center_text_lines(mask: np.ndarray) -> np.ndarray:
-    """按文本行测量非零 x 范围，逐行水平居中。"""
-    height, width = mask.shape
-    rows = np.any(mask, axis=1)
-    if not rows.any():
-        return mask
-    result = np.zeros_like(mask)
-    for y0, y1 in _split_text_rows(rows):
-        band = mask[y0:y1]
-        ys, xs = np.nonzero(band)
-        line_w = int(xs.max()) - int(xs.min()) + 1
-        if line_w >= width:
-            nx_orig = xs
-            nys = ys
-        else:
-            shift = (width - line_w) // 2 - int(xs.min())
-            nx_orig = xs + shift
-            nys = ys
-        valid = (nx_orig >= 0) & (nx_orig < width)
-        result[y0 + nys[valid], nx_orig[valid]] = True
-    return result
 
 
 def _layout_paragraph(
@@ -183,6 +365,12 @@ def _layout_paragraph(
     # 按字号缓存字符宽度，避免重复 getbbox
     offset_cache: dict[tuple[int, int], int] = {}
 
+    # 错字参数提前解包（循环内避免属性查找）
+    miswrite_rate = params.miswrite_rate
+    miswrite_active = miswrite_rate > 0
+    mode = params.miswrite_rewrite_mode
+    strikeout_style = params.miswrite_strikeout_style
+
     def resolve_font(size: int) -> ImageFont.FreeTypeFont:
         if size not in font_cache:
             font_cache[size] = (
@@ -191,8 +379,9 @@ def _layout_paragraph(
         return font_cache[size]
 
     # 阶段一：纯排版（不绘制），随机数消耗顺序与纯文本路径完全一致，
-    # 记录每字的 (字符, x, y, 字号, 行号) 与每行结束 x（含空格推进量）
-    chars: list[tuple[str, int, int, int, int]] = []
+    # 记录每字的 (错字, 原字, x, y, 字号, 行号, 错字标记, 倾角, 局部种子, 重写x)
+    # 与每行结束 x（含空格推进量）。错字判定插在每字扰动之后，rate=0 短路。
+    chars: list[tuple[str, str, float, int, int, int, bool, float, int, float]] = []
     line_x_ends: list[float] = []
     i = 0
     y = line_spacing - font_size
@@ -215,11 +404,25 @@ def _layout_paragraph(
                 size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
                 if size != font_size:
                     resolve_font(size)
-            offset = _char_offset(
-                offset_cache, size, ch, resolve_font(size) if size != font_size_int else base_font
-            )
-            chars.append((ch, round(x), yj, size, len(line_ys) - 1))
-            x += rand.gauss(params.word_spacing + offset, params.word_spacing_sigma)
+            word_noise = rand.gauss(0, params.word_spacing_sigma)
+            miswrite = False
+            wrong_ch = ch
+            angle = 0.0
+            local_seed = 0
+            if miswrite_active and rand.random() < miswrite_rate:
+                miswrite = True
+                wrong_ch = _wrong_char(ch, rand)
+                angle = rand.gauss(0, 0.15)
+                local_seed = rand.getrandbits(64)
+            font = resolve_font(size) if size != font_size_int else base_font
+            offset = _char_offset(offset_cache, size, wrong_ch, font)
+            x_next = x + params.word_spacing + offset + word_noise
+            rewrite_x = x_next if (miswrite and mode == "rewrite") else 0.0
+            chars.append((wrong_ch, ch, x, yj, size, len(line_ys) - 1,
+                          miswrite, angle, local_seed, rewrite_x))
+            x = x_next
+            if miswrite and mode == "rewrite":
+                x += _char_offset(offset_cache, size, ch, font) + params.word_spacing
             i += 1
         line_x_ends.append(x)
         y += line_spacing
@@ -234,18 +437,53 @@ def _layout_paragraph(
         right_x = float(width) - float(right)
         shifts = [right_x - xe for xe in line_x_ends]
 
+    # 居中：按锚定字符（含 Rewrite 重写墨迹范围）计算每行平移，
+    # 使小字带/重写与锚定字符同移，避免行带被独立居中导致漂移
+    center_shifts: list[float] | None = None
+    if paragraph.align == "center":
+        min_x = [float("inf")] * len(line_ys)
+        max_x = [float("-inf")] * len(line_ys)
+        for wrong_ch, correct_ch, cx, cy, size, li, miswrite, angle, local_seed, rewrite_x in chars:
+            f = resolve_font(size) if size != font_size_int else base_font
+            w = _char_offset(offset_cache, size, wrong_ch, f)
+            if cx < min_x[li]:
+                min_x[li] = cx
+            right_w = cx + w
+            if miswrite and mode == "rewrite":
+                right_w = max(right_w, rewrite_x + _char_offset(offset_cache, size, correct_ch, f))
+            if right_w > max_x[li]:
+                max_x[li] = right_w
+        center_shifts = [
+            0.0 if min_x[li] > max_x[li]
+            else (float(width) - (max_x[li] - min_x[li])) / 2.0 - min_x[li]
+            for li in range(len(line_ys))
+        ]
+
     # 阶段二：按段落实际高度创建画布并绘制（不被页高裁剪）
     canvas_h = max(int(y + float(params.font_size) + 4 * float(params.line_spacing_sigma) + 4), 1)
     page = Image.new("1", (width, canvas_h), 0)
     draw = ImageDraw.Draw(page)
-    for ch, cx, cy, size, li in chars:
+    for wrong_ch, correct_ch, cx, cy, size, li, miswrite, angle, local_seed, rewrite_x in chars:
         font = base_font if size == font_size_int else resolve_font(size)
-        dx = round(cx + shifts[li]) if shifts is not None else cx
-        draw.text((dx, cy), ch, fill=1, font=font)
+        shift = 0.0
+        if shifts is not None:
+            shift = shifts[li]
+        elif center_shifts is not None:
+            shift = center_shifts[li]
+        dx = cx + shift
+        draw.text((round(dx), cy), wrong_ch, fill=1, font=font)
+        if miswrite:
+            local = random.Random(local_seed)
+            wrong_advance = _char_offset(offset_cache, size, wrong_ch, font)
+            _draw_miswrite(
+                draw, local, dx, cy, size, wrong_advance, angle,
+                strikeout_style, font, correct_ch, mode == "above",
+                resolve_font, offset_cache,
+            )
+            if mode == "rewrite":
+                draw.text((round(rewrite_x + shift), cy), correct_ch, fill=1, font=font)
 
     mask = np.asarray(page, dtype=bool)
-    if paragraph.align == "center":
-        mask = _center_text_lines(mask)
 
     # 按行提取墨迹：先用连通行带分出每行墨迹组（行间距大于墨迹高度时
     # 每行自成一带），再按顺序归属到各非空行，避免固定中点切分裁掉墨迹。
@@ -253,13 +491,21 @@ def _layout_paragraph(
     bands = _split_text_rows(rows)
     lines: list[tuple[np.ndarray | None, float]] = []
     bi = 0
-    # 墨迹相对绘制基线的合理窗口；超出说明归属错位，钳制避免
+    # 墨迹相对绘制基线的合理窗口；下限放宽容纳 Above 小字悬浮带，
+    # 使所有行保持画布绝对位置；超出说明归属错位，钳制避免
     # 某行被甩到远离其行槽的位置（如页顶残留）
-    off_min, off_max = -0.25 * line_spacing, 0.8 * line_spacing
+    off_min = -0.85 * float(params.font_size) - 0.25 * line_spacing
+    off_max = 0.8 * line_spacing
     for yk in line_ys:
         if bi < len(bands) and bands[bi][0] < yk + line_spacing / 2:
-            s, e = bands[bi]
+            s = bands[bi][0]
+            e = bands[bi][1]
             bi += 1
+            # 一行可能包含多个行带（Above 模式的小字重写悬浮在行顶上方），
+            # 全部归入该行合并提取，避免多余行带被丢弃
+            while bi < len(bands) and bands[bi][0] < yk + line_spacing / 2:
+                e = bands[bi][1]
+                bi += 1
             off = min(max(float(s) - yk, off_min), off_max)
             lines.append((mask[s:e], off))
         else:

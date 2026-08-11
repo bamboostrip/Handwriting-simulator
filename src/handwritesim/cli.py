@@ -57,6 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--red", type=int, default=0)
     parser.add_argument("--green", type=int, default=0)
     parser.add_argument("--blue", type=int, default=0)
+    # 写错字
+    parser.add_argument("--miswrite-rate", type=float, default=0.0, help="错字率 0~1（默认 0 关闭）")
+    parser.add_argument("--miswrite-mode", default="above", choices=["above", "rewrite"],
+                        help="重写方式：above=右上方小字重写，rewrite=后文正常位置重写")
+    parser.add_argument("--miswrite-style", default="line", choices=["line", "double_line", "slash", "cross"],
+                        help="涂改方式：line/double_line/slash/cross")
     return parser
 
 
@@ -89,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         "red": args.red,
         "green": args.green,
         "blue": args.blue,
+        "miswrite_rate": args.miswrite_rate,
+        "miswrite_rewrite_mode": args.miswrite_mode,
+        "miswrite_strikeout_style": args.miswrite_style,
     }
     for key, value in explicit.items():
         setattr(params, key, value)

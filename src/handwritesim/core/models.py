@@ -67,6 +67,11 @@ class HandwritingParams:
     end_chars: str = "，。"
     start_chars: str = ""
 
+    # ---- 写错字模拟 ----
+    miswrite_rate: float = 0.0        # 每字符被判定为错字的概率（0~1，UI 中为 0~30%）
+    miswrite_rewrite_mode: str = "above"   # "above"（右上方小字重写）| "rewrite"（后文正常位置重写）
+    miswrite_strikeout_style: str = "line"  # "line" | "double_line" | "slash" | "cross"
+
     # ------------------------------------------------------------------
     # 便捷属性
     # ------------------------------------------------------------------
@@ -118,6 +123,16 @@ class HandwritingParams:
                 raise self.ValidationError(f"{name} 不能为负")
         if self.perturb_theta_sigma < 0:
             raise self.ValidationError("perturb_theta_sigma 不能为负")
+        if not 0.0 <= self.miswrite_rate <= 1.0:
+            raise self.ValidationError("miswrite_rate 必须在 0~1 之间")
+        if self.miswrite_rewrite_mode not in ("above", "rewrite"):
+            raise self.ValidationError(
+                f"未知重写方式：{self.miswrite_rewrite_mode!r}，可选 above/rewrite"
+            )
+        if self.miswrite_strikeout_style not in ("line", "double_line", "slash", "cross"):
+            raise self.ValidationError(
+                f"未知涂改方式：{self.miswrite_strikeout_style!r}，可选 line/double_line/slash/cross"
+            )
         for name in ("red", "green", "blue"):
             value = getattr(self, name)
             if not isinstance(value, int) or not 0 <= value <= 255:
@@ -164,6 +179,7 @@ class HandwritingParams:
         "word_spacing_sigma", "line_spacing_sigma", "font_size_sigma",
         "perturb_x_sigma", "perturb_y_sigma", "perturb_theta_sigma",
         "end_chars", "start_chars",
+        "miswrite_rate", "miswrite_rewrite_mode", "miswrite_strikeout_style",
     )
 
     def to_dict(self) -> dict[str, Any]:
