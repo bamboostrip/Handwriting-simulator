@@ -4,6 +4,22 @@
 
 提供 **图形界面（GUI）** 与 **命令行（CLI）** 两种使用方式，核心引擎基于 `numpy` + `scipy` 全向量化重写，预览渲染一页约 0.15 秒，实时交互流畅。
 
+## 与 Rust 版的关系
+
+本项目另有 [handwrite-sim](https://github.com/bamboostrip/Handwriting-sim-rs)（Rust 版）——纯 Rust 重写（ab_glyph + 自研笔画扰动引擎），两个版本功能保持同步：
+
+| | Python 版 | Rust 版 |
+| --- | --- | --- |
+| 渲染引擎 | numpy + scipy（FastEngine） | 纯 Rust：ab_glyph + 自研笔画扰动引擎 |
+| 界面 | PyQt6 | Slint（原生渲染，winit + femtovg，软件渲染兜底） |
+| PDF 导出 | ✅（同步对齐） | ✅ **300 DPI 位图层 PDF**（printpdf + lopdf） |
+| 错字率模拟 | ✅（同步对齐） | ✅ **错字率 + 划掉重写**（单线/双线/斜线/叉号四种涂改样式） |
+| docx 导入 | python-docx | zip + quick-xml 自研解析（对齐/首行缩进） |
+| 预览降采样 | PIL resize | fast_image_resize（SIMD，32MP 背景毫秒级） |
+
+> 两个版本功能保持同步（PDF 导出、错字率模拟 Python 版已对齐）。
+> 由于 Rust 版性能优异，部分新功能可能由 Rust 版先行实现，随后同步到 Python 版。
+
 ## 技术栈
 
 | 类别 | 选型 |
