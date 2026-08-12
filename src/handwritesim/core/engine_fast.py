@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from pathlib import Path
 from typing import Iterator, Tuple
@@ -157,26 +158,34 @@ _stroke_width_cache: dict[tuple[str, int], float] = {}
 
 
 def _stroke_width(font: ImageFont.FreeTypeFont) -> float:
-    """测量字体在 font.size 下的笔画宽度（像素），按 (路径, 字号) 缓存。
+    """测量字体在 font.size 下的笔画宽度（像素），按 (字体标识, 字号) 缓存。
 
+    直接用已加载的字体对象渲染探针字符，避免按路径重开字体文件：
+    Windows 上非 ASCII 路径的字体由 PIL 以字节加载，font_variant 生成的
+    变体字体 .path 是已消费的 BytesIO，重开会读到空内容报 cannot open resource。
     用距离变换取笔画中轴像素到背景距离的两倍（90 分位数抗边缘杂点）。
     """
     size = font.size
-    key = (font.path, size)
-    cached = _stroke_width_cache.get(key)
+    path = font.path
+    if isinstance(path, (str, bytes, os.PathLike)):
+        cache_key = (path, size)
+    elif hasattr(path, "getvalue"):
+        cache_key = (path.getvalue(), size)
+    else:
+        cache_key = (id(font), size)
+    cached = _stroke_width_cache.get(cache_key)
     if cached is not None:
         return cached
     probe_size = size * 2
-    probe = ImageFont.truetype(font.path, size=size)
     img = Image.new("1", (probe_size, probe_size), 0)
-    ImageDraw.Draw(img).text((size // 2, size // 2), _STROKE_PROBE_CHAR, fill=1, font=probe)
+    ImageDraw.Draw(img).text((size // 2, size // 2), _STROKE_PROBE_CHAR, fill=1, font=font)
     arr = np.asarray(img, dtype=bool)
     if not arr.any():
         width = max(size * 0.035, 1.5)
     else:
         dist = ndimage.distance_transform_edt(arr)
         width = 2.0 * float(np.percentile(dist[arr], 90))
-    _stroke_width_cache[key] = width
+    _stroke_width_cache[cache_key] = width
     return width
 
 

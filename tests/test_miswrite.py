@@ -118,6 +118,28 @@ def test_miswrite_above_draws_small_char_above(tmp_path: Path) -> None:
     assert rows[0] < first_top, "Above 模式应在行顶上方画出小字"
 
 
+def test_miswrite_above_non_ascii_font_path(tmp_path: Path) -> None:
+    """非 ASCII 字体路径（Windows 常见）不应报 cannot open resource。
+
+    回归防护：PIL 对非 ASCII 路径字体以字节加载，font_variant 变体的
+    .path 是已消费的 BytesIO；笔画测量不能按路径重开字体文件。
+    """
+    import shutil
+
+    font_src = _font()
+    ch_dir = tmp_path / "字体"
+    ch_dir.mkdir()
+    font_dst = ch_dir / "微软雅黑字体.bin"
+    shutil.copy(font_src, font_dst)
+
+    params = _params(tmp_path, "中好工一", size=(600, 400))
+    params.font_path = str(font_dst)
+    params.miswrite_rate = 1.0
+    params.miswrite_rewrite_mode = "above"
+    image = HandwritingEngine(backend="fast", seed=7).render_preview(params)
+    assert np.count_nonzero(np.asarray(image.convert("L")) < 128) > 0
+
+
 def test_above_small_char_same_pen_stroke_width(tmp_path: Path) -> None:
     """Above 模式小字按同一支笔加粗：笔画粗细与原字基本一致，不再明显偏细。
 
