@@ -80,12 +80,93 @@ class NoWheelComboBox(QtWidgets.QComboBox):
 
 
 class PreviewLabel(QtWidgets.QLabel):
-    """预览区：保持宽高比缩放，随窗口尺寸自适应。"""
+    """预览区：保持宽高比缩放，随窗口尺寸自适应；支持框选文字区域。
+
+    框选模式下按住鼠标拖出矩形，松开后发出 region_selected 信号，
+    坐标为预览图像素坐标（调用方负责与原始背景坐标互转）。
+    """
+
+    region_selected = QtCore.pyqtSignal(object)  # QtCore.QRect（预览图坐标）
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._source: QtGui.QPixmap | None = None
+        self._rects: list[QtCore.QRect] = []   # 叠加显示的区域矩形（预览图坐标）
+        self._region_mode = False
+        self._rubber: QtWidgets.QRubberBand | None = None
+        self._origin: QtCore.QPoint | None = None
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+    # ---- 区域框选 ----
+    def set_region_mode(self, on: bool) -> None:
+        """开关框选模式；开启时光标变为十字。"""
+        self._region_mode = on
+        if on:
+            self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
+            if self._rubber is not None:
+                self._rubber.hide()
+
+    def set_region_rects(self, rects: list[QtCore.QRect]) -> None:
+        """设置叠加显示的区域矩形（预览图坐标），立即重绘。"""
+        self._rects = list(rects)
+        self._rescale()
+
+    def _view_transform(self) -> tuple[float, float, float]:
+        """返回 (缩放比, x 偏移, y 偏移)：预览图坐标 -> 控件坐标。"""
+        if self._source is None or self._source.isNull():
+            return 1.0, 0.0, 0.0
+        lw, lh = self.width(), self.height()
+        sw, sh = self._source.width(), self._source.height()
+        scale = min(lw / sw, lh / sh)
+        return scale, (lw - sw * scale) / 2.0, (lh - sh * scale) / 2.0
+
+    def _map_to_source(self, pos: QtCore.QPoint) -> QtCore.QPoint:
+        """控件坐标 -> 预览图像素坐标（钳制在图内）。"""
+        scale, ox, oy = self._view_transform()
+        if self._source is None:
+            return QtCore.QPoint(0, 0)
+        x = round((pos.x() - ox) / scale)
+        y = round((pos.y() - oy) / scale)
+        x = max(0, min(x, self._source.width() - 1))
+        y = max(0, min(y, self._source.height() - 1))
+        return QtCore.QPoint(x, y)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if not self._region_mode or self._source is None:
+            super().mousePressEvent(event)
+            return
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._origin = event.position().toPoint()
+            if self._rubber is None:
+                self._rubber = QtWidgets.QRubberBand(
+                    QtWidgets.QRubberBand.Shape.Rectangle, self
+                )
+            self._rubber.setGeometry(QtCore.QRect(self._origin, QtCore.QSize()))
+            self._rubber.show()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._region_mode and self._rubber is not None and self._rubber.isVisible():
+            self._rubber.setGeometry(
+                QtCore.QRect(self._origin, event.position().toPoint()).normalized()
+            )
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if self._region_mode and self._rubber is not None and self._rubber.isVisible():
+            self._rubber.hide()
+            rect = self._rubber.geometry()
+            self._origin = None
+            tl = self._map_to_source(rect.topLeft())
+            br = self._map_to_source(rect.bottomRight())
+            source_rect = QtCore.QRect(tl, br).normalized()
+            # 过滤误触的极小选区
+            if source_rect.width() >= 4 and source_rect.height() >= 4:
+                self.region_selected.emit(source_rect)
+            return
+        super().mouseReleaseEvent(event)
 
     def setPixmap(self, pixmap: QtGui.QPixmap | None) -> None:  # type: ignore[override]
         self._source = pixmap
@@ -101,13 +182,33 @@ class PreviewLabel(QtWidgets.QLabel):
     def _rescale(self) -> None:
         if self._source is None or self._source.isNull():
             return
-        super().setPixmap(
-            self._source.scaled(
-                self.size(),
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                QtCore.Qt.TransformationMode.SmoothTransformation,
-            )
+        pm = self._source.scaled(
+            self.size(),
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
         )
+        if self._rects:
+            pm = self._draw_rect_overlays(pm)
+        super().setPixmap(pm)
+
+    def _draw_rect_overlays(self, pm: QtGui.QPixmap) -> QtGui.QPixmap:
+        """把已添加的区域矩形画到缩放后的预览图上（虚线框 + 浅色填充）。"""
+        scale, ox, oy = self._view_transform()
+        overlay = QtGui.QPixmap(pm)
+        painter = QtGui.QPainter(overlay)
+        pen = QtGui.QPen(QtGui.QColor("#e5484d"), 2, QtCore.Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QtGui.QColor(229, 72, 77, 28))
+        for r in self._rects:
+            disp = QtCore.QRect(
+                round(r.x() * scale + ox),
+                round(r.y() * scale + oy),
+                max(1, round(r.width() * scale)),
+                max(1, round(r.height() * scale)),
+            )
+            painter.drawRect(disp)
+        painter.end()
+        return overlay
 
 
 class Ui_Form(object):
@@ -152,6 +253,10 @@ class Ui_Form(object):
         self.btn_preview_bg = QtWidgets.QPushButton(left)
         self.btn_preview_bg.setObjectName("btn_preview_bg")
         row_nav.addWidget(self.btn_preview_bg)
+        self.btn_select_region = QtWidgets.QPushButton(left)
+        self.btn_select_region.setObjectName("btn_select_region")
+        self.btn_select_region.setCheckable(True)
+        row_nav.addWidget(self.btn_select_region)
         left_col.addLayout(row_nav)
         root.addWidget(left, 1)
 
@@ -203,6 +308,30 @@ class Ui_Form(object):
         self.textEdit.setMinimumHeight(120)
         self.textEdit.setMaximumHeight(200)
         v.addWidget(self.textEdit)
+
+        # 框选文字区域（实验特性：手写 / 打印混排）
+        self.group_regions = QtWidgets.QGroupBox(panel)
+        self.group_regions.setObjectName("group_regions")
+        gr = QtWidgets.QVBoxLayout(self.group_regions)
+        self.label_regions_hint = QtWidgets.QLabel(self.group_regions)
+        self.label_regions_hint.setWordWrap(True)
+        self.label_regions_hint.setStyleSheet("color: #6b7a70; font-weight: normal;")
+        gr.addWidget(self.label_regions_hint)
+        self.region_list = QtWidgets.QListWidget(self.group_regions)
+        self.region_list.setObjectName("region_list")
+        self.region_list.setMinimumHeight(64)
+        self.region_list.setMaximumHeight(120)
+        gr.addWidget(self.region_list)
+        row_region_btns = QtWidgets.QHBoxLayout()
+        self.btn_region_delete = QtWidgets.QPushButton(self.group_regions)
+        self.btn_region_delete.setObjectName("btn_region_delete")
+        row_region_btns.addWidget(self.btn_region_delete)
+        self.btn_region_clear = QtWidgets.QPushButton(self.group_regions)
+        self.btn_region_clear.setObjectName("btn_region_clear")
+        row_region_btns.addWidget(self.btn_region_clear)
+        row_region_btns.addStretch(1)
+        gr.addLayout(row_region_btns)
+        v.addWidget(self.group_regions)
 
         # 字体 / 背景 文件选择
         grid_file = QtWidgets.QGridLayout()
@@ -425,6 +554,18 @@ class Ui_Form(object):
         self.btn_prev.setText("◀ 上一页")
         self.btn_next.setText("下一页 ▶")
         self.btn_preview_bg.setText("预览底色")
+        self.btn_select_region.setText("框选文字")
+        self.btn_select_region.setToolTip(
+            "勾选后在预览图上按住鼠标拖出矩形，松开后输入该区域的文字\n"
+            "（可独立选择手写体 / 打印体，实现混排）"
+        )
+        self.group_regions.setTitle("文字区域（手写 / 打印混排）")
+        self.label_regions_hint.setText(
+            "勾选「框选文字」后在左侧预览图拖出矩形，即可在该位置生成"
+            "独立排版的文字；双击列表项可再次编辑。"
+        )
+        self.btn_region_delete.setText("删除选中")
+        self.btn_region_clear.setText("清空")
         self.label_page.setText("第 1 / 1 页")
         self.label_text.setText(_translate("Form", "待处理文本"))
         self.btn_align_left.setText("左对齐")

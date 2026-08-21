@@ -32,6 +32,29 @@ class Paragraph:
 
 
 @dataclass
+class TextRegion:
+    """页面上一个框选文字区域（实验特性：手写/打印混排）。
+
+    坐标为背景图原始像素坐标（与预览降采样无关，GUI 负责换算）。
+    文字在矩形内自行换行，放不下时流式延续到下一页的同一矩形。
+    """
+
+    x: int = 0                   # 区域左上角横坐标
+    y: int = 0                   # 区域左上角纵坐标
+    w: int = 0                   # 区域宽
+    h: int = 0                   # 区域高
+    text: str = ""               # 区域内文字
+    font_path: str = ""          # 区域独立字体；空 = 使用主字体
+    printed: bool = False        # True = 打印体（零扰动、规整排版）
+    font_size: int = 0           # 区域字号；0 = 跟随主设置
+
+    def label(self, index: int) -> str:
+        """区域列表里的一行摘要。"""
+        style = "打印" if self.printed else "手写"
+        return f"{index}. {style} {len(self.text)}字 ({self.x},{self.y} {self.w}×{self.h})"
+
+
+@dataclass
 class HandwritingParams:
     """一次手写模拟的完整参数。"""
 
@@ -40,6 +63,7 @@ class HandwritingParams:
     background_path: str = ""
     text: str = ""
     paragraphs: list[Paragraph] | None = None  # 非空时启用段落渲染
+    regions: list[TextRegion] | None = None    # 非空时在框选矩形内渲染（可与主文字并存）
 
     # ---- 字体颜色 (RGB) ----
     red: int = 0
@@ -103,7 +127,12 @@ class HandwritingParams:
 
     def validate(self, *, require_text: bool = True) -> None:
         """校验参数是否完整、合法，失败抛出 ValidationError。"""
-        if require_text and not self.text.strip() and not self.paragraphs:
+        if (
+            require_text
+            and not self.text.strip()
+            and not self.paragraphs
+            and not any(r.text.strip() for r in self.regions or [])
+        ):
             raise self.ValidationError("未输入要处理的文字")
         if not self.font_path:
             raise self.ValidationError("未指定字体文件")
@@ -125,6 +154,15 @@ class HandwritingParams:
             raise self.ValidationError("perturb_theta_sigma 不能为负")
         if not 0.0 <= self.miswrite_rate <= 1.0:
             raise self.ValidationError("miswrite_rate 必须在 0~1 之间")
+        for i, region in enumerate(self.regions or [], start=1):
+            if region.w <= 0 or region.h <= 0:
+                raise self.ValidationError(f"文字区域 {i} 的宽高必须为正")
+            if region.x < 0 or region.y < 0:
+                raise self.ValidationError(f"文字区域 {i} 的坐标不能为负")
+            if region.font_path and not Path(region.font_path).is_file():
+                raise self.ValidationError(f"文字区域 {i} 的字体文件不存在：{region.font_path}")
+            if region.font_size < 0:
+                raise self.ValidationError(f"文字区域 {i} 的字号不能为负")
         if self.miswrite_rewrite_mode not in ("above", "rewrite"):
             raise self.ValidationError(
                 f"未知重写方式：{self.miswrite_rewrite_mode!r}，可选 above/rewrite"
@@ -171,7 +209,7 @@ class HandwritingParams:
             setattr(params, name, _coerce(raw, current))
         return params
 
-    # 预设仅保存排版参数，不含文本内容（text/paragraphs 不属于预设范围）
+    # 预设仅保存排版参数，不含文本内容（text/paragraphs/regions 不属于预设范围）
     _PRESET_FIELDS: tuple[str, ...] = (
         "font_path", "background_path",
         "font_size", "word_spacing", "line_spacing",

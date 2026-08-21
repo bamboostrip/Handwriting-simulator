@@ -18,9 +18,10 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ..core.models import HandwritingParams
+from ..core.models import HandwritingParams, TextRegion
 from ..core import presets
 from ..core.paths import assets_root, ensure_assets_dirs
+from .region_dialog import RegionDialog
 from .workers import RenderWorker
 from .ui import Ui_Form
 
@@ -55,6 +56,9 @@ class MainWindow(QMainWindow):
         # 预览全部页与当前页索引
         self._preview_pages: list = []
         self._preview_index = 0
+        # 框选文字区域（原始背景像素坐标）与最近一次预览的降采样比例
+        self._regions: list[TextRegion] = []
+        self._preview_scale = 1.0
         # 预览分辨率上限：fast 引擎全分辨率渲染已足够快（约 0.15s/页），
         # 上限设高使常见信纸（如 2480 宽）预览与原始程序一样全分辨率渲染，
         # 避免降采样导致笔画变细碎裂、扰动后发丑；仅对超大背景兜底降采样。
@@ -93,6 +97,12 @@ class MainWindow(QMainWindow):
         ui.btn_prev.clicked.connect(self._prev_page)
         ui.btn_next.clicked.connect(self._next_page)
         ui.btn_preview_bg.clicked.connect(self._toggle_preview_bg)
+        # 框选文字区域
+        ui.btn_select_region.toggled.connect(self._on_region_mode_toggled)
+        ui.label_11.region_selected.connect(self._on_region_selected)
+        ui.btn_region_delete.clicked.connect(self._delete_selected_region)
+        ui.btn_region_clear.clicked.connect(self._clear_regions)
+        ui.region_list.itemDoubleClicked.connect(self._edit_region)
         # 写错字：滑块数值同步到百分比标签
         ui.miswrite_rate_slider.valueChanged.connect(self._update_miswrite_rate_label)
         self._update_miswrite_rate_label(ui.miswrite_rate_slider.value())
@@ -203,6 +213,119 @@ class MainWindow(QMainWindow):
         self._set_paragraphs(paras)
 
     # ------------------------------------------------------------------
+    # 框选文字区域（手写 / 打印混排）
+    # ------------------------------------------------------------------
+    def _on_region_mode_toggled(self, checked: bool) -> None:
+        """预览区进入 / 退出框选模式。"""
+        self._ui.label_11.set_region_mode(checked)
+
+    def _on_region_selected(self, rect) -> None:
+        """预览图上框选完成：换算回原始背景坐标并弹出编辑对话框。"""
+        from PyQt6.QtWidgets import QDialog
+
+        scale = self._preview_scale
+        dlg = RegionDialog(
+            self,
+            main_font_size=self._int_of(self._ui.lineEdit_9, 36),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = dlg.region_text
+        if not text.strip():
+            return
+        region = TextRegion(
+            x=max(0, round(rect.x() / scale)),
+            y=max(0, round(rect.y() / scale)),
+            w=max(8, round(rect.width() / scale)),
+            h=max(8, round(rect.height() / scale)),
+            text=text,
+            font_path=dlg.region_font_path,
+            printed=dlg.region_printed,
+            font_size=dlg.region_font_size,
+        )
+        try:
+            region_font_check = (
+                f"文字区域字体文件不存在：{region.font_path}"
+                if region.font_path
+                and not Path(region.font_path).is_file()
+                else ""
+            )
+        except OSError:
+            region_font_check = ""
+        if region_font_check:
+            QMessageBox.warning(self, "字体检查", region_font_check)
+            return
+        self._regions.append(region)
+        self._refresh_region_list()
+        self._preview_timer.start()
+
+    def _refresh_region_list(self) -> None:
+        """刷新区域列表与预览图上的矩形叠加。"""
+        lst = self._ui.region_list
+        lst.blockSignals(True)
+        lst.clear()
+        for i, region in enumerate(self._regions, start=1):
+            lst.addItem(region.label(i))
+        lst.blockSignals(False)
+        self._update_region_overlays()
+
+    def _update_region_overlays(self) -> None:
+        """把区域矩形换算到预览坐标后叠加到预览图上。"""
+        from PyQt6.QtCore import QRect
+
+        s = self._preview_scale
+        rects = [
+            QRect(
+                round(r.x * s), round(r.y * s),
+                max(1, round(r.w * s)), max(1, round(r.h * s)),
+            )
+            for r in self._regions
+        ]
+        self._ui.label_11.set_region_rects(rects)
+
+    def _delete_selected_region(self) -> None:
+        row = self._ui.region_list.currentRow()
+        if 0 <= row < len(self._regions):
+            self._regions.pop(row)
+            self._refresh_region_list()
+            self._preview_timer.start()
+
+    def _clear_regions(self) -> None:
+        if not self._regions:
+            return
+        self._regions.clear()
+        self._refresh_region_list()
+        self._preview_timer.start()
+
+    def _edit_region(self, item) -> None:
+        """双击列表项重新编辑该区域。"""
+        from PyQt6.QtWidgets import QDialog
+
+        row = self._ui.region_list.row(item)
+        if not 0 <= row < len(self._regions):
+            return
+        region = self._regions[row]
+        dlg = RegionDialog(
+            self,
+            title=f"编辑文字区域 {row + 1}",
+            text=region.text,
+            printed=region.printed,
+            font_path=region.font_path,
+            font_size=region.font_size,
+            main_font_size=self._int_of(self._ui.lineEdit_9, 36),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not dlg.region_text.strip():
+            return
+        region.text = dlg.region_text
+        region.printed = dlg.region_printed
+        region.font_path = dlg.region_font_path
+        region.font_size = dlg.region_font_size
+        self._refresh_region_list()
+        self._preview_timer.start()
+
+    # ------------------------------------------------------------------
     # 文件选择
     # ------------------------------------------------------------------
     def _choose_font(self) -> None:
@@ -249,6 +372,8 @@ class MainWindow(QMainWindow):
         p.miswrite_strikeout_style = ("line", "double_line", "slash", "cross")[
             ui.miswrite_style_combo.currentIndex()
         ]
+        # 框选区域：拷贝快照，避免渲染线程读到后续被编辑的同一对象
+        p.regions = [copy.copy(r) for r in self._regions]
         return p
 
     def _collect_paragraphs(self):
@@ -496,20 +621,25 @@ class MainWindow(QMainWindow):
     def _downsample_preview(self, params: HandwritingParams) -> HandwritingParams:
         """预览时若背景过大则降采样并按比例缩放参数，保证实时性。
 
-        不影响导出（导出使用原始参数）。
+        不影响导出（导出使用原始参数）。同时记录缩放比例，
+        供框选区域在预览坐标与原始背景坐标之间换算。
         """
         bg_path = Path(params.background_path)
         if not bg_path.is_file():
+            self._preview_scale = 1.0
             return params
         try:
             with Image.open(bg_path) as bg:
                 width, height = bg.size
         except Exception:  # noqa: BLE001
+            self._preview_scale = 1.0
             return params
         if width <= self._preview_max_width:
+            self._preview_scale = 1.0
             return params
 
         scale = self._preview_max_width / width
+        self._preview_scale = scale
         new_width = self._preview_max_width
         new_height = max(1, round(height * scale))
         with Image.open(bg_path) as bg:
@@ -528,6 +658,17 @@ class MainWindow(QMainWindow):
         for attr in self._SPATIAL_ATTRS:
             setattr(preview, attr, getattr(preview, attr) * scale)
         preview.font_size = max(1.0, preview.font_size)
+        # 框选区域同样按比例缩放到预览坐标（深拷贝，不污染原始快照）
+        preview.regions = [
+            TextRegion(
+                x=round(r.x * scale), y=round(r.y * scale),
+                w=max(1, round(r.w * scale)), h=max(1, round(r.h * scale)),
+                text=r.text, font_path=r.font_path,
+                printed=r.printed,
+                font_size=round(r.font_size * scale) if r.font_size else 0,
+            )
+            for r in params.regions or []
+        ]
         return preview
 
     # ------------------------------------------------------------------

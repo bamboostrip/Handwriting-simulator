@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import os
 import random
@@ -23,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-from .models import HandwritingParams, Paragraph
+from .models import HandwritingParams, Paragraph, TextRegion
 
 # 4-连通邻域结构
 _CONNECTIVITY = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
@@ -240,13 +241,28 @@ def _layout_page(
     text: str,
     start: int,
 ) -> Tuple[np.ndarray, int]:
-    """排版一页文字，返回前景掩码（bool 数组）与本页消费的字符数。
+    """排版一页文字，返回前景掩码（bool 数组）与本页消费的字符数。"""
+    with Image.open(params.background_path) as bg:
+        width, height = bg.size
+    return _layout_text(params, rand, text, start, width, height)
+
+
+def _layout_text(
+    params: HandwritingParams,
+    rand: random.Random,
+    text: str,
+    start: int,
+    width: int,
+    height: int,
+    force_first_line: bool = False,
+) -> Tuple[np.ndarray, int]:
+    """在 width×height 画布内排版文字，返回前景掩码与消费的字符数。
 
     复刻 handright 的 _draw_page + _flow_layout 逻辑：逐字绘制、
     行/字/字号高斯扰动、end_chars/start_chars 换行规则。
+    页面路径传背景尺寸，区域路径传框选矩形的宽高；
+    区域路径传 force_first_line=True，矩形再矮也至少排一行。
     """
-    with Image.open(params.background_path) as bg:
-        width, height = bg.size
     page = Image.new("1", (width, height), 0)
     draw = ImageDraw.Draw(page)
     base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
@@ -281,7 +297,9 @@ def _layout_page(
 
     i = start
     y = top + line_spacing - font_size
-    while y <= height - bottom - font_size:
+    first_line = True
+    while y <= height - bottom - font_size or (force_first_line and first_line):
+        first_line = False
         x = left
         while True:
             if i >= text_len:
@@ -525,24 +543,22 @@ def _layout_paragraph(
 # ---------------------------------------------------------------------------
 # 笔画扰动（全向量化）
 # ---------------------------------------------------------------------------
-def _perturb_mask(
+def _perturbed_positions(
     mask: np.ndarray,
     params: HandwritingParams,
     rng: np.random.Generator,
-    background: np.ndarray,
-) -> np.ndarray:
-    """对前景掩码按笔画做独立随机扰动并写回画布。
+) -> tuple[np.ndarray, np.ndarray]:
+    """对前景掩码按笔画做独立随机扰动，返回扰动后的墨迹像素坐标 (ys, xs)。
 
     全向量化：一次为所有笔画生成扰动参数，再用 label 索引批量变换
-    所有前景像素，避免逐笔画 Python 循环。返回 RGB 画布（H, W, 3）。
+    所有前景像素，避免逐笔画 Python 循环。坐标已裁剪到掩码尺寸内。
     """
     height, width = mask.shape
-    canvas = background.copy()
     if not mask.any():
-        return canvas
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty.copy()
 
     labels, n_strokes = ndimage.label(mask, structure=_CONNECTIVITY)
-    fill = np.array(params.fill, dtype=np.uint8)
 
     # 每笔画的独立扰动参数（批量生成）
     dxs = rng.normal(0, params.perturb_x_sigma, n_strokes)
@@ -574,7 +590,19 @@ def _perturb_mask(
     nx = np.rint(fx + dx).astype(np.int64)
     ny = np.rint(fy + dy).astype(np.int64)
     valid = (nx >= 0) & (nx < width) & (ny >= 0) & (ny < height)
-    canvas[ny[valid], nx[valid]] = fill
+    return ny[valid], nx[valid]
+
+
+def _perturb_mask(
+    mask: np.ndarray,
+    params: HandwritingParams,
+    rng: np.random.Generator,
+    background: np.ndarray,
+) -> np.ndarray:
+    """对前景掩码按笔画做独立随机扰动并写回画布。返回 RGB 画布（H, W, 3）。"""
+    canvas = background.copy()
+    ny, nx = _perturbed_positions(mask, params, rng)
+    canvas[ny, nx] = np.array(params.fill, dtype=np.uint8)
     return canvas
 
 
@@ -595,6 +623,8 @@ class FastEngine:
     def render_preview(self, params: HandwritingParams) -> Image.Image:
         """仅渲染第一页，用于预览。"""
         params.validate()
+        if params.regions:
+            return next(self._pages_with_regions(params))
         if params.paragraphs:
             return next(self._paragraph_pages(params))
         rand = self._new_rand()
@@ -607,16 +637,119 @@ class FastEngine:
         """生成手写图序列（惰性迭代），与引擎接口一致。"""
         return self.generate_pages(params)
 
+    def _region_params(
+        self, params: HandwritingParams, region: TextRegion
+    ) -> HandwritingParams:
+        """构造区域局部的渲染参数：独立字体/字号；打印体关闭全部扰动。"""
+        rp = copy.copy(params)
+        rp.text = region.text
+        rp.paragraphs = None
+        rp.regions = None
+        # 区域以矩形自身为界，不再叠加整页边距
+        rp.left_margin = 0
+        rp.right_margin = 0
+        rp.top_margin = 0
+        rp.bottom_margin = 0
+        if region.font_path:
+            rp.font_path = region.font_path
+        if region.font_size > 0:
+            rp.font_size = region.font_size
+        if region.printed:
+            rp.word_spacing_sigma = 0
+            rp.line_spacing_sigma = 0
+            rp.font_size_sigma = 0
+            rp.perturb_x_sigma = 0
+            rp.perturb_y_sigma = 0
+            rp.perturb_theta_sigma = 0.0
+            rp.miswrite_rate = 0.0
+        return rp
+
+    def _main_page_masks(
+        self, params: HandwritingParams, width: int, height: int
+    ) -> list[np.ndarray]:
+        """主文字（text 或 paragraphs）的逐页墨迹掩码；无文字返回 []。"""
+        if params.paragraphs:
+            return list(self._paragraph_page_masks(params, width, height))
+        if not params.text.strip():
+            return []
+        rand = self._new_rand()
+        masks: list[np.ndarray] = []
+        start = 0
+        while True:
+            mask, start = _layout_text(params, rand, params.text, start, width, height)
+            masks.append(mask)
+            if start >= len(params.text):
+                break
+        return masks
+
+    def _pages_with_regions(
+        self, params: HandwritingParams
+    ) -> Iterator[Image.Image]:
+        """框选区域模式：每个区域独立排版，与主文字合成后逐页输出。
+
+        页数取主文字与各区域所需页数的最大值；某区域文字超出其矩形时
+        流式延续到下一页的同一矩形（与整页排版行为一致）。区域先合成、
+        主文字后合成（重叠时主文字在上）；随机源消费顺序固定，
+        相同 seed 下预览与导出逐像素一致。
+        """
+        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        height, width = background.shape[:2]
+        main_masks = self._main_page_masks(params, width, height)
+
+        entries: list[tuple[HandwritingParams, int, int, list[np.ndarray]]] = []
+        for index, region in enumerate(params.regions or []):
+            if not region.text.strip():
+                continue
+            ox = max(0, min(int(region.x), width - 1))
+            oy = max(0, min(int(region.y), height - 1))
+            rw = max(1, min(int(region.w), width - ox))
+            rh = max(1, min(int(region.h), height - oy))
+            rp = self._region_params(params, region)
+            # 每区域独立排版随机源：由主 seed 派生的确定性字符串种子，
+            # 保证相同 seed 下预览与导出的逐字扰动完全一致
+            rand = random.Random(f"{self._seed}|region{index}")
+            masks: list[np.ndarray] = []
+            start = 0
+            while True:
+                prev = start
+                mask, start = _layout_text(
+                    rp, rand, region.text, start, rw, rh, force_first_line=True
+                )
+                masks.append(mask)
+                # 区域矮到一行都放不下时 start 不再推进，直接结束避免死循环
+                if start >= len(region.text) or start == prev:
+                    break
+            entries.append((rp, ox, oy, masks))
+
+        n_pages = max([len(main_masks)] + [len(e[3]) for e in entries] + [1])
+        for page_index in range(n_pages):
+            canvas = background.copy()
+            for rp, ox, oy, masks in entries:
+                if page_index >= len(masks):
+                    continue
+                ys, xs = _perturbed_positions(masks[page_index], rp, self._rng)
+                canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
+            if page_index < len(main_masks):
+                canvas = _perturb_mask(main_masks[page_index], params, self._rng, canvas)
+            yield Image.fromarray(canvas, mode="RGB")
+
     def _paragraph_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
-        """按段落逐页渲染，逐行流式分页（与纯文本路径填满页面一致）。
+        """按段落逐页渲染（逐行流式分页），在掩码基础上做笔画扰动。"""
+        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        height, width = background.shape[:2]
+        for page_canvas in self._paragraph_page_masks(params, width, height):
+            yield self._finalize(params, page_canvas, background)
+
+    def _paragraph_page_masks(
+        self, params: HandwritingParams, width: int, height: int
+    ) -> Iterator[np.ndarray]:
+        """按段落逐页排版，yield 每页前景掩码（不做笔画扰动）。
 
         行节奏与纯文本路径对齐：首行绘制基线位于 top + line_spacing（不含字高），
         每行（含段内换行、段落边界、空行）均推进一个完整行距；
         某行的绘制基线越过页底限制时才换页，保证首页不留空白。
         """
-        background = np.asarray(Image.open(params.background_path).convert("RGB"))
         rand = self._new_rand()
-        height, width = background.shape[:2]
         line_spacing = float(params.line_spacing) + float(params.font_size)
         lead = line_spacing - float(params.font_size)
         # 预览降采样会使边距为浮点，这里取整以保证 numpy 索引为整数
@@ -637,7 +770,7 @@ class FastEngine:
         for band, off in all_lines:
             # 与纯文本路径一致：每行（含空行）开始前检查是否越页底
             if draw_y > limit and page_canvas.any():
-                yield self._finalize(params, page_canvas, background)
+                yield page_canvas
                 yielded = True
                 page_canvas = np.zeros((height, width), dtype=bool)
                 draw_y = float(top) + lead
@@ -650,7 +783,7 @@ class FastEngine:
                 page_canvas[rows[valid], xs[valid]] = True
             draw_y += line_spacing
         if page_canvas.any() or not yielded:
-            yield self._finalize(params, page_canvas, background)
+            yield page_canvas
 
     # _finalize 使用 self._rng，与 generate_pages 共用同一随机源
     def _finalize(self, params, mask, background):
@@ -659,6 +792,9 @@ class FastEngine:
     def generate_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
         """逐页生成手写图（惰性迭代）。"""
         params.validate()
+        if params.regions:
+            yield from self._pages_with_regions(params)
+            return
         if params.paragraphs:
             yield from self._paragraph_pages(params)
             return
