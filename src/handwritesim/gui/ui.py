@@ -82,8 +82,10 @@ class NoWheelComboBox(QtWidgets.QComboBox):
 class PreviewLabel(QtWidgets.QLabel):
     """预览区：保持宽高比缩放，随窗口尺寸自适应；支持框选文字区域。
 
-    框选模式下按住鼠标拖出矩形，松开后发出 region_selected 信号，
-    坐标为预览图像素坐标（调用方负责与原始背景坐标互转）。
+    框选模式下按住鼠标拖出矩形，松开后发出 region_selected 信号；
+    set_region_rects 用于临时高亮（如悬浮区域列表项时），
+    坐标均为预览图像素坐标（调用方负责与原始背景坐标互转）。
+    坐标换算以实际显示位图的逻辑尺寸为基准，兼容系统 DPI 缩放。
     """
 
     region_selected = QtCore.pyqtSignal(object)  # QtCore.QRect（预览图坐标）
@@ -91,7 +93,8 @@ class PreviewLabel(QtWidgets.QLabel):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._source: QtGui.QPixmap | None = None
-        self._rects: list[QtCore.QRect] = []   # 叠加显示的区域矩形（预览图坐标）
+        self._disp: QtGui.QPixmap | None = None  # 缩放后实际显示的位图
+        self._rects: list[QtCore.QRect] = []     # 临时高亮的矩形（预览图坐标）
         self._region_mode = False
         self._rubber: QtWidgets.QRubberBand | None = None
         self._origin: QtCore.QPoint | None = None
@@ -109,26 +112,41 @@ class PreviewLabel(QtWidgets.QLabel):
                 self._rubber.hide()
 
     def set_region_rects(self, rects: list[QtCore.QRect]) -> None:
-        """设置叠加显示的区域矩形（预览图坐标），立即重绘。"""
+        """设置临时高亮的区域矩形（预览图坐标），立即重绘；空列表清除。"""
         self._rects = list(rects)
         self._rescale()
 
-    def _view_transform(self) -> tuple[float, float, float]:
-        """返回 (缩放比, x 偏移, y 偏移)：预览图坐标 -> 控件坐标。"""
-        if self._source is None or self._source.isNull():
-            return 1.0, 0.0, 0.0
-        lw, lh = self.width(), self.height()
-        sw, sh = self._source.width(), self._source.height()
-        scale = min(lw / sw, lh / sh)
-        return scale, (lw - sw * scale) / 2.0, (lh - sh * scale) / 2.0
+    def _display_geometry(self) -> tuple[float, float, float, float] | None:
+        """显示位图的逻辑几何 (宽, 高, x偏移, y偏移)；尚未就绪返回 None。"""
+        if self._disp is None or self._disp.isNull():
+            return None
+        dpr = self._disp.devicePixelRatio()
+        if dpr <= 0:
+            dpr = 1.0
+        dw = self._disp.width() / dpr
+        dh = self._disp.height() / dpr
+        return dw, dh, (self.width() - dw) / 2.0, (self.height() - dh) / 2.0
 
     def _map_to_source(self, pos: QtCore.QPoint) -> QtCore.QPoint:
-        """控件坐标 -> 预览图像素坐标（钳制在图内）。"""
-        scale, ox, oy = self._view_transform()
-        if self._source is None:
+        """控件坐标 -> 预览图像素坐标（钳制在图内）。
+
+        按实际显示位图的逻辑尺寸线性换算：显示位图与源位图的
+        devicePixelRatio 相同，直接用原始像素宽高相除即可，
+        系统缩放（DPR ≠ 1）不会引入偏差。
+        """
+        if self._source is None or self._source.isNull():
             return QtCore.QPoint(0, 0)
-        x = round((pos.x() - ox) / scale)
-        y = round((pos.y() - oy) / scale)
+        geo = self._display_geometry()
+        if geo is None:
+            # 尚未完成首次缩放：退化为整控件映射
+            lw = max(1, self.width())
+            lh = max(1, self.height())
+            x = round(pos.x() * self._source.width() / lw)
+            y = round(pos.y() * self._source.height() / lh)
+        else:
+            dw, dh, ox, oy = geo
+            x = round((pos.x() - ox) * self._source.width() / dw)
+            y = round((pos.y() - oy) * self._source.height() / dh)
         x = max(0, min(x, self._source.width() - 1))
         y = max(0, min(y, self._source.height() - 1))
         return QtCore.QPoint(x, y)
@@ -159,10 +177,14 @@ class PreviewLabel(QtWidgets.QLabel):
             self._rubber.hide()
             rect = self._rubber.geometry()
             self._origin = None
+            # 过滤误触：按控件坐标判断拖动距离（与用户感知一致，
+            # 源坐标会随背景分辨率放大，不适合作为阈值）。
+            # QRect 宽高含端点：移动 2px 的橡皮带宽为 3，阈值取 4
+            if rect.width() < 4 or rect.height() < 4:
+                return
             tl = self._map_to_source(rect.topLeft())
             br = self._map_to_source(rect.bottomRight())
             source_rect = QtCore.QRect(tl, br).normalized()
-            # 过滤误触的极小选区
             if source_rect.width() >= 4 and source_rect.height() >= 4:
                 self.region_selected.emit(source_rect)
             return
@@ -182,33 +204,36 @@ class PreviewLabel(QtWidgets.QLabel):
     def _rescale(self) -> None:
         if self._source is None or self._source.isNull():
             return
-        pm = self._source.scaled(
+        self._disp = self._source.scaled(
             self.size(),
             QtCore.Qt.AspectRatioMode.KeepAspectRatio,
             QtCore.Qt.TransformationMode.SmoothTransformation,
         )
+        pm = self._disp
         if self._rects:
             pm = self._draw_rect_overlays(pm)
         super().setPixmap(pm)
 
     def _draw_rect_overlays(self, pm: QtGui.QPixmap) -> QtGui.QPixmap:
-        """把已添加的区域矩形画到缩放后的预览图上（虚线框 + 浅色填充）。"""
-        scale, ox, oy = self._view_transform()
-        overlay = QtGui.QPixmap(pm)
-        painter = QtGui.QPainter(overlay)
-        pen = QtGui.QPen(QtGui.QColor("#e5484d"), 2, QtCore.Qt.PenStyle.DashLine)
+        """把高亮矩形画到缩放后的位图上（虚线框 + 浅色填充）。
+
+        位图内部没有留白偏移，源坐标按原始像素宽高等比缩放即可；
+        先对 painter 做 scale，再直接用源坐标绘制，兼容 DPR ≠ 1。
+        """
+        if self._source is None or self._source.isNull():
+            return pm
+        k = pm.width() / max(1, self._source.width())
+        painter = QtGui.QPainter(pm)
+        pen = QtGui.QPen(
+            QtGui.QColor("#e5484d"), max(1, round(2 / k)), QtCore.Qt.PenStyle.DashLine
+        )
         painter.setPen(pen)
         painter.setBrush(QtGui.QColor(229, 72, 77, 28))
+        painter.scale(k, k)
         for r in self._rects:
-            disp = QtCore.QRect(
-                round(r.x() * scale + ox),
-                round(r.y() * scale + oy),
-                max(1, round(r.width() * scale)),
-                max(1, round(r.height() * scale)),
-            )
-            painter.drawRect(disp)
+            painter.drawRect(r)
         painter.end()
-        return overlay
+        return pm
 
 
 class Ui_Form(object):
@@ -562,7 +587,8 @@ class Ui_Form(object):
         self.group_regions.setTitle("文字区域（手写 / 打印混排）")
         self.label_regions_hint.setText(
             "勾选「框选文字」后在左侧预览图拖出矩形，即可在该位置生成"
-            "独立排版的文字；双击列表项可再次编辑。"
+            "独立排版的文字；双击列表项可再次编辑，悬浮列表项时预览中"
+            "会临时高亮对应区域。"
         )
         self.btn_region_delete.setText("删除选中")
         self.btn_region_clear.setText("清空")

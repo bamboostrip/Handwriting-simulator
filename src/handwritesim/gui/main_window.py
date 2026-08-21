@@ -103,6 +103,10 @@ class MainWindow(QMainWindow):
         ui.btn_region_delete.clicked.connect(self._delete_selected_region)
         ui.btn_region_clear.clicked.connect(self._clear_regions)
         ui.region_list.itemDoubleClicked.connect(self._edit_region)
+        # 悬浮区域列表项 -> 预览图临时高亮对应框选区域
+        ui.region_list.setMouseTracking(True)
+        ui.region_list.itemEntered.connect(self._on_region_hover)
+        ui.region_list.viewport().installEventFilter(self)
         # 写错字：滑块数值同步到百分比标签
         ui.miswrite_rate_slider.valueChanged.connect(self._update_miswrite_rate_label)
         self._update_miswrite_rate_label(ui.miswrite_rate_slider.value())
@@ -223,7 +227,20 @@ class MainWindow(QMainWindow):
         """预览图上框选完成：换算回原始背景坐标并弹出编辑对话框。"""
         from PyQt6.QtWidgets import QDialog
 
-        scale = self._preview_scale
+        # 预览图坐标 -> 原始背景坐标（scale = 原始/预览，≥1）
+        scale = self._preview_scale_now()
+        x = max(0, round(rect.x() * scale))
+        y = max(0, round(rect.y() * scale))
+        w = max(8, round(rect.width() * scale))
+        h = max(8, round(rect.height() * scale))
+        # 钳制到背景图范围内兜底，避免比例异常时产生越界坐标
+        try:
+            with Image.open(self._ui.lineEdit_2.text().strip()) as bg:
+                bw, bh = bg.size
+            x, y = min(x, max(0, bw - 8)), min(y, max(0, bh - 8))
+            w, h = min(w, bw - x), min(h, bh - y)
+        except Exception:  # noqa: BLE001
+            pass
         dlg = RegionDialog(
             self,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
@@ -234,10 +251,7 @@ class MainWindow(QMainWindow):
         if not text.strip():
             return
         region = TextRegion(
-            x=max(0, round(rect.x() / scale)),
-            y=max(0, round(rect.y() / scale)),
-            w=max(8, round(rect.width() / scale)),
-            h=max(8, round(rect.height() / scale)),
+            x=x, y=y, w=w, h=h,
             text=text,
             font_path=dlg.region_font_path,
             printed=dlg.region_printed,
@@ -260,33 +274,65 @@ class MainWindow(QMainWindow):
         self._preview_timer.start()
 
     def _refresh_region_list(self) -> None:
-        """刷新区域列表与预览图上的矩形叠加。"""
+        """刷新区域列表（红框不再常驻，仅悬浮列表项时临时高亮）。"""
         lst = self._ui.region_list
         lst.blockSignals(True)
         lst.clear()
         for i, region in enumerate(self._regions, start=1):
             lst.addItem(region.label(i))
         lst.blockSignals(False)
-        self._update_region_overlays()
 
-    def _update_region_overlays(self) -> None:
-        """把区域矩形换算到预览坐标后叠加到预览图上。"""
+    def _preview_scale_now(self) -> float:
+        """当前预览位图相对原始背景的缩放比，按两者实际宽度计算。
+
+        不依赖缓存的 _preview_scale，避免切换背景后比例失准；
+        背景不可读时退回最近一次预览记录的比例。
+        """
+        pm = self._ui.label_11.pixmap()
+        bg_path = self._ui.lineEdit_2.text().strip()
+        if pm is not None and not pm.isNull() and bg_path:
+            try:
+                with Image.open(bg_path) as bg:
+                    bg_w = bg.width
+                if bg_w > 0 and pm.width() > 0:
+                    return bg_w / pm.width()
+            except Exception:  # noqa: BLE001
+                pass
+        # 回退：_preview_scale 是预览/原始（<1），取倒数统一为原始/预览
+        return 1.0 / self._preview_scale if self._preview_scale else 1.0
+
+    def _show_region_highlight(self, row: int | None) -> None:
+        """在预览图上临时高亮指定区域；row 为 None 时清除高亮。"""
         from PyQt6.QtCore import QRect
 
-        s = self._preview_scale
-        rects = [
+        if row is None or not 0 <= row < len(self._regions):
+            self._ui.label_11.set_region_rects([])
+            return
+        r = self._regions[row]
+        s = self._preview_scale_now()
+        self._ui.label_11.set_region_rects([
             QRect(
-                round(r.x * s), round(r.y * s),
-                max(1, round(r.w * s)), max(1, round(r.h * s)),
+                round(r.x / s), round(r.y / s),
+                max(1, round(r.w / s)), max(1, round(r.h / s)),
             )
-            for r in self._regions
-        ]
-        self._ui.label_11.set_region_rects(rects)
+        ])
+
+    def _on_region_hover(self, item) -> None:
+        """悬浮区域列表项：在预览图上高亮对应框选区域。"""
+        self._show_region_highlight(self._ui.region_list.row(item))
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        from PyQt6.QtCore import QEvent
+
+        if obj is self._ui.region_list.viewport() and event.type() == QEvent.Type.Leave:
+            self._show_region_highlight(None)
+        return super().eventFilter(obj, event)
 
     def _delete_selected_region(self) -> None:
         row = self._ui.region_list.currentRow()
         if 0 <= row < len(self._regions):
             self._regions.pop(row)
+            self._show_region_highlight(None)
             self._refresh_region_list()
             self._preview_timer.start()
 
@@ -294,6 +340,7 @@ class MainWindow(QMainWindow):
         if not self._regions:
             return
         self._regions.clear()
+        self._show_region_highlight(None)
         self._refresh_region_list()
         self._preview_timer.start()
 
