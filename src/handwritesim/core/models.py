@@ -133,17 +133,21 @@ class HandwritingParams:
         """参数校验失败。"""
 
     def validate(self, *, require_text: bool = True) -> None:
-        """校验参数是否完整、合法，失败抛出 ValidationError。"""
-        if (
-            require_text
-            and not self.text.strip()
-            and not self.paragraphs
-            and not any(r.text.strip() for r in self.regions or [])
-        ):
+        """校验参数是否完整、合法，失败抛出 ValidationError。
+
+        require_text=False 时允许"纯背景预览"：没有文字/区域时不要求
+        字体（一个字都不画），但仍要求背景文件有效。
+        """
+        has_content = (
+            bool(self.text.strip())
+            or bool(self.paragraphs)
+            or any(r.text.strip() for r in self.regions or [])
+        )
+        if require_text and not has_content:
             raise self.ValidationError("未输入要处理的文字")
-        if not self.font_path:
+        if has_content and not self.font_path:
             raise self.ValidationError("未指定字体文件")
-        if not Path(self.font_path).is_file():
+        if has_content and not Path(self.font_path).is_file():
             raise self.ValidationError(f"字体文件不存在：{self.font_path}")
         if not self.background_path:
             raise self.ValidationError("未指定背景图片")

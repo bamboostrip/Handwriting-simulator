@@ -252,6 +252,9 @@ def _layout_text(
     区域路径传 force_first_line=True，矩形再矮也至少排一行。
     """
     page = Image.new("1", (width, height), 0)
+    # 纯背景预览（无文字）时不加载字体，允许 font_path 为空
+    if start >= len(text):
+        return np.asarray(page, dtype=bool), start
     draw = ImageDraw.Draw(page)
     base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
     # 按字号缓存字体与字符宽度，避免每次扰动都重建字体/重新测量
@@ -642,7 +645,7 @@ class FastEngine:
 
     def render_preview(self, params: HandwritingParams) -> Image.Image:
         """仅渲染第一页，用于预览。"""
-        params.validate()
+        params.validate(require_text=False)
         return next(self.generate_pages(params))
 
     def generate(self, params: HandwritingParams) -> Iterator[Image.Image]:
@@ -821,8 +824,12 @@ class FastEngine:
         return Image.fromarray(_perturb_mask(mask, params, self._rng, background), mode="RGB")
 
     def generate_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
-        """逐页生成手写图（惰性迭代）。"""
-        params.validate()
+        """逐页生成手写图（惰性迭代）。
+
+        引擎只做结构校验（require_text=False）：文字是否必填由
+        GUI/CLI 各自决定，纯背景预览在这里合法。
+        """
+        params.validate(require_text=False)
         if params.regions:
             yield from self._pages_with_regions(params)
             return

@@ -129,3 +129,38 @@ def test_missing_page_background_fails_validation(tmp_path) -> None:
     params.regions = [TextRegion(x=10, y=10, w=50, h=40, text="字")]
     with pytest.raises(HandwritingParams.ValidationError):
         params.validate(require_text=True)
+
+
+# ---------------------------------------------------------------------------
+# 纯背景预览（无文字、无区域、无字体）
+# ---------------------------------------------------------------------------
+def test_validate_allows_background_only_without_font(tmp_path) -> None:
+    """无任何文字时不需要字体即可通过结构校验；require_text=True 仍拒绝。"""
+    bg = tmp_path / "bg.png"
+    _flat_image((255, 255, 255)).save(bg)
+    params = HandwritingParams(background_path=str(bg))
+    params.validate(require_text=False)  # 不抛异常即通过
+    with pytest.raises(HandwritingParams.ValidationError):
+        params.validate(require_text=True)
+
+
+def test_engine_renders_single_blank_background(tmp_path) -> None:
+    """只有单张背景时预览输出一页空白背景。"""
+    bg = tmp_path / "bg.png"
+    _flat_image((250, 250, 250)).save(bg)
+    params = HandwritingParams(background_path=str(bg))
+    pages = list(HandwritingEngine(backend="fast").generate(params))
+    assert len(pages) == 1
+    assert pages[0].size == (400, 300)
+    assert not _near_black_mask(pages[0]).any()
+
+
+def test_engine_renders_all_document_pages_without_text(tmp_path) -> None:
+    """导入的多页文档背景在无文字时也应整本输出，便于翻页框选。"""
+    params = _bg_params(tmp_path, [(255, 0, 0), (0, 0, 255), (0, 128, 0)])
+    pages = list(HandwritingEngine(backend="fast").generate(params))
+    assert len(pages) == 3
+    arr0 = np.asarray(pages[0].convert("RGB")).astype(np.int16)
+    arr2 = np.asarray(pages[2].convert("RGB")).astype(np.int16)
+    assert arr0[..., 0].mean() > 180  # 第一页红
+    assert arr2[..., 1].mean() > 80   # 第三页绿

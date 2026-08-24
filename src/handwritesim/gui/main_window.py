@@ -640,7 +640,8 @@ class MainWindow(QMainWindow):
         raw = self.collect_params()
         params = self._downsample_preview(raw)
         try:
-            params.validate(require_text=True)
+            # 允许纯背景预览：只要背景就绪即可预览，方便用户空背景框选
+            params.validate(require_text=False)
         except HandwritingParams.ValidationError as exc:
             QMessageBox.information(self, "参数检查", str(exc))
             return
@@ -654,7 +655,8 @@ class MainWindow(QMainWindow):
         raw = self.collect_params()
         params = self._downsample_preview(raw)
         try:
-            params.validate(require_text=True)
+            # 与手动预览一致：纯背景（无文字）也允许自动预览
+            params.validate(require_text=False)
         except HandwritingParams.ValidationError:
             return
         self._auto = True
