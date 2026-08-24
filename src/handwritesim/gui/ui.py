@@ -89,6 +89,8 @@ class PreviewLabel(QtWidgets.QLabel):
     """
 
     region_selected = QtCore.pyqtSignal(object)  # QtCore.QRect（预览图坐标）
+    region_geometry_changed = QtCore.pyqtSignal(object)  # 调整后的新矩形（预览图坐标）
+    region_edit_cancelled = QtCore.pyqtSignal()  # 编辑态被取消（Esc/点击框外）
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -97,12 +99,22 @@ class PreviewLabel(QtWidgets.QLabel):
         self._rects: list[QtCore.QRect] = []     # 临时高亮的矩形（预览图坐标）
         self._region_mode = False
         self._rubber: QtWidgets.QRubberBand | None = None
-        self._origin: QtCore.QPoint | None = None
+        self._origin: QtCore.QPoint | None = None      # 新建拖拽起点（控件坐标）
+        self._edit_rect: QtCore.QRect | None = None    # 调整中区域（预览图坐标）
+        self._adjust: str | None = None                # move / tl / tr / bl / br / l / r / t / b
+        self._press_pos: QtCore.QPoint | None = None   # 按下位置（控件坐标）
+        self._press_rect: QtCore.QRect | None = None   # 按下时编辑框（控件坐标）
+        # 无按键移动也接收 move 事件，用于边缘/四角的光标提示
+        self.setMouseTracking(True)
+        # 允许点击聚焦以接收 Esc 退出调整
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
     # ---- 区域框选 ----
     def set_region_mode(self, on: bool) -> None:
-        """开关框选模式；开启时光标变为十字。"""
+        """开关框选模式；开启时光标变为十字，并结束进行中的区域调整。"""
+        if on and self._edit_rect is not None:
+            self._finish_edit(emit=True)
         self._region_mode = on
         if on:
             self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
@@ -115,6 +127,169 @@ class PreviewLabel(QtWidgets.QLabel):
         """设置临时高亮的区域矩形（预览图坐标），立即重绘；空列表清除。"""
         self._rects = list(rects)
         self._rescale()
+
+    # ---- 区域调整（点击列表项进入）----
+    def _ensure_rubber(self) -> None:
+        if self._rubber is None:
+            self._rubber = QtWidgets.QRubberBand(
+                QtWidgets.QRubberBand.Shape.Rectangle, self
+            )
+
+    def _display_area(self) -> QtCore.QRect:
+        """显示位图在控件内的矩形区域（用于把调整限制在图纸范围内）。"""
+        geo = self._display_geometry()
+        if geo is None:
+            return self.rect()
+        dw, dh, ox, oy = geo
+        return QtCore.QRect(
+            round(ox), round(oy), max(1, round(dw)), max(1, round(dh))
+        )
+
+    def _rect_to_widget(self, source_rect: QtCore.QRect) -> QtCore.QRect:
+        """预览图坐标矩形 -> 控件坐标矩形。"""
+        geo = self._display_geometry()
+        if geo is None or self._source is None or self._source.isNull():
+            return QtCore.QRect(source_rect)
+        k = geo[0] / max(1, self._source.width())
+        return QtCore.QRect(
+            round(geo[2] + source_rect.x() * k),
+            round(geo[3] + source_rect.y() * k),
+            max(1, round(source_rect.width() * k)),
+            max(1, round(source_rect.height() * k)),
+        )
+
+    def begin_region_edit(self, source_rect: QtCore.QRect) -> None:
+        """进入调整模式：按预览图坐标显示可拖动/缩放的编辑框。"""
+        if self._source is None or self._source.isNull():
+            return
+        self._ensure_rubber()
+        self._edit_rect = QtCore.QRect(source_rect)
+        self._rubber.setGeometry(self._rect_to_widget(self._edit_rect))
+        self._rubber.show()
+
+    def end_region_edit(self) -> None:
+        """静默退出调整模式（窗口主动调用，不发取消信号）。"""
+        self._finish_edit(emit=False)
+
+    def is_editing(self) -> bool:
+        return self._edit_rect is not None
+
+    def _finish_edit(self, emit: bool) -> None:
+        had = self._edit_rect is not None
+        self._edit_rect = None
+        self._adjust = None
+        self._press_pos = None
+        self._press_rect = None
+        # 新建拖拽与编辑共用橡皮带：仅当没有进行中的新建拖拽时才隐藏
+        if self._origin is None and self._rubber is not None:
+            self._rubber.hide()
+        self.unsetCursor()
+        if emit and had:
+            self.region_edit_cancelled.emit()
+
+    def _hit_zone(self, pos: QtCore.QPoint) -> str:
+        """判断控件坐标命中编辑框的部位：角/边/内部/外部。"""
+        if self._rubber is None or not self._rubber.isVisible():
+            return "outside"
+        r = self._rubber.geometry()
+        m = 8  # 边缘命中容差（逻辑像素）
+        near_l = abs(pos.x() - r.left()) <= m
+        near_r = abs(pos.x() - r.right()) <= m
+        near_t = abs(pos.y() - r.top()) <= m
+        near_b = abs(pos.y() - r.bottom()) <= m
+        in_v = r.top() <= pos.y() <= r.bottom()
+        in_h = r.left() <= pos.x() <= r.right()
+        if near_l and near_t:
+            return "tl"
+        if near_r and near_t:
+            return "tr"
+        if near_l and near_b:
+            return "bl"
+        if near_r and near_b:
+            return "br"
+        if near_l and in_v:
+            return "l"
+        if near_r and in_v:
+            return "r"
+        if near_t and in_h:
+            return "t"
+        if near_b and in_h:
+            return "b"
+        if r.contains(pos):
+            return "move"
+        return "outside"
+
+    _ZONE_CURSORS = {
+        "tl": QtCore.Qt.CursorShape.SizeFDiagCursor,
+        "br": QtCore.Qt.CursorShape.SizeFDiagCursor,
+        "tr": QtCore.Qt.CursorShape.SizeBDiagCursor,
+        "bl": QtCore.Qt.CursorShape.SizeBDiagCursor,
+        "l": QtCore.Qt.CursorShape.SizeHorCursor,
+        "r": QtCore.Qt.CursorShape.SizeHorCursor,
+        "t": QtCore.Qt.CursorShape.SizeVerCursor,
+        "b": QtCore.Qt.CursorShape.SizeVerCursor,
+        "move": QtCore.Qt.CursorShape.SizeAllCursor,
+    }
+
+    def _update_cursor(self, zone: str) -> None:
+        if zone == "outside":
+            if self._region_mode:
+                self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+            else:
+                self.unsetCursor()
+        else:
+            self.setCursor(self._ZONE_CURSORS[zone])
+
+    def _begin_adjust(self, zone: str, pos: QtCore.QPoint) -> None:
+        self._adjust = zone
+        self._press_pos = QtCore.QPoint(pos)
+        self._press_rect = QtCore.QRect(self._rubber.geometry())
+        self.setCursor(self._ZONE_CURSORS[zone])
+
+    def _apply_adjust(self, pos: QtCore.QPoint) -> None:
+        """按当前调整部位更新编辑框几何（限制在显示区内）。"""
+        if self._rubber is None or self._press_rect is None or self._press_pos is None:
+            return
+        area = self._display_area()
+        p = QtCore.QPoint(
+            max(area.left(), min(pos.x(), area.right())),
+            max(area.top(), min(pos.y(), area.bottom())),
+        )
+        if self._adjust == "move":
+            dx = p.x() - self._press_pos.x()
+            dy = p.y() - self._press_pos.y()
+            r = QtCore.QRect(self._press_rect)
+            r.translate(dx, dy)
+            r.moveLeft(max(area.left(), min(r.left(), area.right() - r.width() + 1)))
+            r.moveTop(max(area.top(), min(r.top(), area.bottom() - r.height() + 1)))
+            self._rubber.setGeometry(r)
+            return
+        l = self._press_rect.left()
+        t = self._press_rect.top()
+        rr = self._press_rect.right()
+        b = self._press_rect.bottom()
+        if "l" in self._adjust:
+            l = p.x()
+        if "r" in self._adjust:
+            rr = p.x()
+        if "t" in self._adjust:
+            t = p.y()
+        if "b" in self._adjust:
+            b = p.y()
+        new = QtCore.QRect(
+            QtCore.QPoint(min(l, rr), min(t, b)),
+            QtCore.QPoint(max(l, rr), max(t, b)),
+        )
+        # 过小的增量直接忽略，保持上一几何
+        if new.width() >= 4 and new.height() >= 4:
+            self._rubber.setGeometry(new)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
+        if event.key() == QtCore.Qt.Key.Key_Escape and self._edit_rect is not None:
+            self._finish_edit(emit=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _display_geometry(self) -> tuple[float, float, float, float] | None:
         """显示位图的逻辑几何 (宽, 高, x偏移, y偏移)；尚未就绪返回 None。"""
@@ -152,28 +327,77 @@ class PreviewLabel(QtWidgets.QLabel):
         return QtCore.QPoint(x, y)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
-        if not self._region_mode or self._source is None:
+        if self._source is None or self._source.isNull():
             super().mousePressEvent(event)
             return
-        if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self._origin = event.position().toPoint()
-            if self._rubber is None:
-                self._rubber = QtWidgets.QRubberBand(
-                    QtWidgets.QRubberBand.Shape.Rectangle, self
-                )
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position().toPoint()
+        # 已有编辑框优先命中：抓取移动/缩放（即使处于新建模式）
+        if self._edit_rect is not None:
+            zone = self._hit_zone(pos)
+            if zone != "outside":
+                self._begin_adjust(zone, pos)
+                event.accept()
+                return
+        if self._region_mode:
+            # 新建框选拖拽；若处于编辑态先退出
+            if self._edit_rect is not None:
+                self._finish_edit(emit=True)
+            self._origin = QtCore.QPoint(pos)
+            self._ensure_rubber()
             self._rubber.setGeometry(QtCore.QRect(self._origin, QtCore.QSize()))
             self._rubber.show()
+            event.accept()
+            return
+        if self._edit_rect is not None:
+            # 非新建模式下点击框外：结束调整
+            self._finish_edit(emit=True)
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._region_mode and self._rubber is not None and self._rubber.isVisible():
-            self._rubber.setGeometry(
-                QtCore.QRect(self._origin, event.position().toPoint()).normalized()
-            )
+        pos = event.position().toPoint()
+        if self._adjust is not None:
+            self._apply_adjust(pos)
+            event.accept()
             return
+        if (
+            self._region_mode
+            and self._origin is not None
+            and self._rubber is not None
+            and self._rubber.isVisible()
+        ):
+            self._rubber.setGeometry(
+                QtCore.QRect(self._origin, pos).normalized()
+            )
+            event.accept()
+            return
+        if self._edit_rect is not None:
+            self._update_cursor(self._hit_zone(pos))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
-        if self._region_mode and self._rubber is not None and self._rubber.isVisible():
+        if self._adjust is not None:
+            rect = self._rubber.geometry() if self._rubber is not None else None
+            press_rect = self._press_rect
+            self._adjust = None
+            self._press_pos = None
+            self._press_rect = None
+            self._update_cursor(self._hit_zone(event.position().toPoint()))
+            if rect is not None and press_rect is not None and rect != press_rect:
+                tl = self._map_to_source(rect.topLeft())
+                br = self._map_to_source(rect.bottomRight())
+                self._edit_rect = QtCore.QRect(tl, br).normalized()
+                self.region_geometry_changed.emit(QtCore.QRect(self._edit_rect))
+            event.accept()
+            return
+        if (
+            self._region_mode
+            and self._origin is not None
+            and self._rubber is not None
+            and self._rubber.isVisible()
+        ):
             self._rubber.hide()
             rect = self._rubber.geometry()
             self._origin = None
@@ -187,6 +411,7 @@ class PreviewLabel(QtWidgets.QLabel):
             source_rect = QtCore.QRect(tl, br).normalized()
             if source_rect.width() >= 4 and source_rect.height() >= 4:
                 self.region_selected.emit(source_rect)
+            event.accept()
             return
         super().mouseReleaseEvent(event)
 
@@ -213,6 +438,15 @@ class PreviewLabel(QtWidgets.QLabel):
         if self._rects:
             pm = self._draw_rect_overlays(pm)
         super().setPixmap(pm)
+        # 编辑中的调整框跟随新的显示几何重新定位（预览重渲染/窗口缩放后）
+        if (
+            self._edit_rect is not None
+            and self._origin is None
+            and self._adjust is None
+            and self._rubber is not None
+        ):
+            self._rubber.setGeometry(self._rect_to_widget(self._edit_rect))
+            self._rubber.show()
 
     def _draw_rect_overlays(self, pm: QtGui.QPixmap) -> QtGui.QPixmap:
         """把高亮矩形画到缩放后的位图上（虚线框 + 浅色填充）。
@@ -586,9 +820,9 @@ class Ui_Form(object):
         )
         self.group_regions.setTitle("文字区域（手写 / 打印混排）")
         self.label_regions_hint.setText(
-            "勾选「框选文字」后在左侧预览图拖出矩形，即可在该位置生成"
-            "独立排版的文字；双击列表项可再次编辑，悬浮列表项时预览中"
-            "会临时高亮对应区域。"
+            "勾选「框选文字」后在左侧预览图拖出矩形生成文字；单击右侧"
+            "列表项可在预览中拖动 / 缩放该区域边框（Esc 或点击空白退出），"
+            "双击列表项可编辑文字。"
         )
         self.btn_region_delete.setText("删除选中")
         self.btn_region_clear.setText("清空")

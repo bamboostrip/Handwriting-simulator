@@ -128,6 +128,106 @@ def test_drag_tiny_selection_filtered(app) -> None:
     assert _drag(label, (10, 10), (12, 12)) == []
 
 
+# ---------------------------------------------------------------------------
+# 区域调整（点击列表项进入编辑态）
+# ---------------------------------------------------------------------------
+def _press(label: PreviewLabel, pos: tuple[int, int]) -> None:
+    label.mousePressEvent(_mouse_event(QEvent.Type.MouseButtonPress, QPointF(*pos)))
+
+
+def _move(label: PreviewLabel, pos: tuple[int, int]) -> None:
+    label.mouseMoveEvent(_mouse_event(QEvent.Type.MouseMove, QPointF(*pos)))
+
+
+def _release(label: PreviewLabel, pos: tuple[int, int]) -> None:
+    label.mouseReleaseEvent(_mouse_event(QEvent.Type.MouseButtonRelease, QPointF(*pos)))
+
+
+def test_begin_edit_places_band(app) -> None:
+    """进入调整态后，橡皮带应按预览图坐标定位（此处缩放比为 2）。"""
+    label = _make_label(app, src=(400, 300), label_size=(200, 150))
+    label.show()
+    label.begin_region_edit(QRect(100, 100, 100, 50))
+    assert label.is_editing()
+    g = label._rubber.geometry()
+    assert (g.x(), g.y(), g.width(), g.height()) == (50, 50, 50, 25)
+
+
+def test_move_edit_band_emits_new_rect(app) -> None:
+    """在框内按下拖动应整体平移，松手发出新的预览图坐标矩形。"""
+    label = _make_label(app, src=(400, 300), label_size=(200, 150))
+    label.show()
+    changed = []
+    label.region_geometry_changed.connect(changed.append)
+    label.begin_region_edit(QRect(100, 100, 100, 50))  # 控件 (50,50,50,25)
+    _press(label, (75, 62))   # 框内 → move
+    _move(label, (85, 62))    # 右移 10px 控件 = 20px 源
+    _release(label, (85, 62))
+    assert len(changed) == 1
+    r = changed[0]
+    assert r.x() == 120 and r.y() == 100
+    assert abs(r.width() - 100) <= 2 and abs(r.height() - 50) <= 2
+
+
+def test_resize_edit_band_corner(app) -> None:
+    """抓住右下角拖动应调整大小，左上角保持不动。"""
+    label = _make_label(app, src=(400, 300), label_size=(200, 150))
+    label.show()
+    changed = []
+    label.region_geometry_changed.connect(changed.append)
+    label.begin_region_edit(QRect(100, 100, 100, 50))  # 控件 (50,50,50,25)
+    _press(label, (100, 75))  # 右下角
+    _move(label, (140, 110))
+    _release(label, (140, 110))
+    assert len(changed) == 1
+    r = changed[0]
+    assert r.x() == 100 and r.y() == 100  # 左上角锚定
+    assert r.width() > 150 and r.height() > 75
+
+
+def test_click_outside_cancels_edit(app) -> None:
+    """非新建模式下点击框外空白应结束调整并发取消信号。"""
+    label = _make_label(app, src=(400, 300), label_size=(200, 150))
+    label.show()
+    cancelled = []
+    label.region_edit_cancelled.connect(lambda: cancelled.append(1))
+    label.begin_region_edit(QRect(100, 100, 100, 50))
+    _press(label, (180, 140))  # 框外
+    _release(label, (180, 140))
+    assert cancelled == [1]
+    assert not label.is_editing()
+
+
+def test_esc_cancels_edit(app) -> None:
+    """Esc 应结束调整。"""
+    from PyQt6.QtGui import QKeyEvent
+
+    label = _make_label(app)
+    label.show()
+    cancelled = []
+    label.region_edit_cancelled.connect(lambda: cancelled.append(1))
+    label.begin_region_edit(QRect(100, 100, 100, 50))
+    ev = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier
+    )
+    label.keyPressEvent(ev)
+    assert cancelled == [1]
+    assert not label.is_editing()
+
+
+def test_creation_mode_ends_edit_and_still_works(app) -> None:
+    """进入新建模式会退出调整态；新建拖拽不受影响。"""
+    label = _make_label(app, src=(400, 300), label_size=(200, 150))
+    label.show()
+    cancelled = []
+    label.region_edit_cancelled.connect(lambda: cancelled.append(1))
+    label.begin_region_edit(QRect(100, 100, 100, 50))
+    result = _drag(label, (20, 20), (80, 70))  # 会先结束编辑再新建
+    assert cancelled == [1]
+    assert not label.is_editing()
+    assert len(result) == 1
+
+
 def test_highlight_does_not_mutate_source(app) -> None:
     """叠加高亮只影响显示，不改动源位图。"""
     label = _make_label(app)

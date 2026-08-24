@@ -59,6 +59,8 @@ class MainWindow(QMainWindow):
         # 框选文字区域（原始背景像素坐标）与最近一次预览的降采样比例
         self._regions: list[TextRegion] = []
         self._preview_scale = 1.0
+        # 当前正在预览图上拖动/缩放调整的区域行号（None = 非调整态）
+        self._editing_row: int | None = None
         # 预览分辨率上限：fast 引擎全分辨率渲染已足够快（约 0.15s/页），
         # 上限设高使常见信纸（如 2480 宽）预览与原始程序一样全分辨率渲染，
         # 避免降采样导致笔画变细碎裂、扰动后发丑；仅对超大背景兜底降采样。
@@ -107,6 +109,10 @@ class MainWindow(QMainWindow):
         ui.region_list.setMouseTracking(True)
         ui.region_list.itemEntered.connect(self._on_region_hover)
         ui.region_list.viewport().installEventFilter(self)
+        # 单击列表项 -> 预览图出现可拖动/缩放的调整框
+        ui.region_list.itemClicked.connect(self._on_region_item_clicked)
+        ui.label_11.region_geometry_changed.connect(self._on_region_geometry_changed)
+        ui.label_11.region_edit_cancelled.connect(self._on_region_edit_cancelled)
         # 写错字：滑块数值同步到百分比标签
         ui.miswrite_rate_slider.valueChanged.connect(self._update_miswrite_rate_label)
         self._update_miswrite_rate_label(ui.miswrite_rate_slider.value())
@@ -319,7 +325,50 @@ class MainWindow(QMainWindow):
 
     def _on_region_hover(self, item) -> None:
         """悬浮区域列表项：在预览图上高亮对应框选区域。"""
+        if self._editing_row is not None:
+            return  # 调整态下不叠加悬浮高亮，避免与调整框混淆
         self._show_region_highlight(self._ui.region_list.row(item))
+
+    def _on_region_item_clicked(self, item) -> None:
+        """单击列表项：在预览图上显示该区域的调整框，可拖动/缩放二次调整。"""
+        row = self._ui.region_list.row(item)
+        if not 0 <= row < len(self._regions):
+            return
+        from PyQt6.QtCore import QRect
+
+        self._editing_row = row
+        r = self._regions[row]
+        s = self._preview_scale_now()
+        self._ui.label_11.begin_region_edit(QRect(
+            round(r.x / s), round(r.y / s),
+            max(1, round(r.w / s)), max(1, round(r.h / s)),
+        ))
+
+    def _on_region_geometry_changed(self, rect) -> None:
+        """预览图上拖动/缩放完成：写回区域坐标并自动刷新预览。"""
+        if self._editing_row is None or not 0 <= self._editing_row < len(self._regions):
+            return
+        scale = self._preview_scale_now()
+        x = max(0, round(rect.x() * scale))
+        y = max(0, round(rect.y() * scale))
+        w = max(4, round(rect.width() * scale))
+        h = max(4, round(rect.height() * scale))
+        # 钳制到背景图范围内兜底
+        try:
+            with Image.open(self._ui.lineEdit_2.text().strip()) as bg:
+                bw, bh = bg.size
+            x, y = min(x, max(0, bw - 4)), min(y, max(0, bh - 4))
+            w, h = min(w, bw - x), min(h, bh - y)
+        except Exception:  # noqa: BLE001
+            pass
+        region = self._regions[self._editing_row]
+        region.x, region.y, region.w, region.h = x, y, w, h
+        self._refresh_region_list()
+        self._preview_timer.start()
+
+    def _on_region_edit_cancelled(self) -> None:
+        """预览图上结束了区域调整（Esc / 点击框外）。"""
+        self._editing_row = None
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         from PyQt6.QtCore import QEvent
@@ -332,6 +381,8 @@ class MainWindow(QMainWindow):
         row = self._ui.region_list.currentRow()
         if 0 <= row < len(self._regions):
             self._regions.pop(row)
+            self._editing_row = None
+            self._ui.label_11.end_region_edit()
             self._show_region_highlight(None)
             self._refresh_region_list()
             self._preview_timer.start()
@@ -340,6 +391,8 @@ class MainWindow(QMainWindow):
         if not self._regions:
             return
         self._regions.clear()
+        self._editing_row = None
+        self._ui.label_11.end_region_edit()
         self._show_region_highlight(None)
         self._refresh_region_list()
         self._preview_timer.start()
