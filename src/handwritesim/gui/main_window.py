@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.models import HandwritingParams, TextRegion
+from ..core import doc_render
 from ..core import presets
 from ..core.paths import assets_root, ensure_assets_dirs
 from .region_dialog import RegionDialog
@@ -61,6 +62,8 @@ class MainWindow(QMainWindow):
         self._preview_scale = 1.0
         # 当前正在预览图上拖动/缩放调整的区域行号（None = 非调整态）
         self._editing_row: int | None = None
+        # 文档底图：导入的 PDF/DOCX 打印预览逐页 PNG（None = 未使用）
+        self._doc_pages: list[str] | None = None
         # 预览分辨率上限：fast 引擎全分辨率渲染已足够快（约 0.15s/页），
         # 上限设高使常见信纸（如 2480 宽）预览与原始程序一样全分辨率渲染，
         # 避免降采样导致笔画变细碎裂、扰动后发丑；仅对超大背景兜底降采样。
@@ -83,6 +86,9 @@ class MainWindow(QMainWindow):
         ui = self._ui
         ui.pushButton.clicked.connect(self._choose_font)
         ui.pushButton_2.clicked.connect(self._choose_background)
+        ui.pushButton_8.clicked.connect(self._import_document)
+        # 手动改背景路径时自动失效文档底图状态
+        ui.lineEdit_2.textChanged.connect(self._sync_doc_state)
         ui.pushButton_3.clicked.connect(self._on_preview)
         ui.pushButton_5.clicked.connect(self._on_export)
         ui.pushButton_7.clicked.connect(self._on_export_pdf)
@@ -463,7 +469,45 @@ class MainWindow(QMainWindow):
         start_dir = str(Path(assets_root()) / "backgrounds")
         path, _ = QFileDialog.getOpenFileName(self, "选择背景", start_dir, "图片 (*.png *.jpg *.jpeg *.bmp *.webp)")
         if path:
+            self._doc_pages = None
+            self._ui.lineEdit_14.clear()
             self._ui.lineEdit_2.setText(path)
+
+    # ------------------------------------------------------------------
+    # 文档底图（PDF / Word 打印预览）
+    # ------------------------------------------------------------------
+    def _import_document(self) -> None:
+        """导入 PDF/DOCX：把打印预览逐页渲染为背景（替换当前背景）。"""
+        start_dir = str(Path(assets_root()) / "backgrounds")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入 PDF / Word 文档", start_dir, "文档 (*.pdf *.docx)"
+        )
+        if not path:
+            return
+        ret = QMessageBox.question(
+            self,
+            "导入文档",
+            "导入的文档会按打印预览逐页生成为背景，\n"
+            "替换当前选择的背景图片。是否继续？",
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        out_dir = Path(self._out_dir) / ".preview_cache" / "doc_bg"
+        try:
+            pages = doc_render.document_to_page_images(path, out_dir, dpi=200)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "导入失败", str(exc))
+            return
+        self._doc_pages = [str(p) for p in pages]
+        self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
+        self._ui.lineEdit_2.setText(str(pages[0]))
+        self._preview_timer.start()
+
+    def _sync_doc_state(self) -> None:
+        """背景路径不再指向文档首页时（手动改选），清除文档底图状态。"""
+        if self._doc_pages and self._ui.lineEdit_2.text().strip() != self._doc_pages[0]:
+            self._doc_pages = None
+            self._ui.lineEdit_14.clear()
 
     # ------------------------------------------------------------------
     # 参数收集（界面 -> 模型）
@@ -476,6 +520,9 @@ class MainWindow(QMainWindow):
         p.paragraphs = self._collect_paragraphs()
         p.font_path = ui.lineEdit.text().strip()
         p.background_path = ui.lineEdit_2.text().strip()
+        # 文档多页底图：仅当背景仍指向文档首页时生效（手动改背景即失效）
+        if self._doc_pages and p.background_path == self._doc_pages[0]:
+            p.background_pages = list(self._doc_pages)
         p.red, p.green, p.blue = self._color_of(ui.lineEdit_10, (0, 0, 0))
         p.word_spacing = self._int_of(ui.lineEdit_7, p.word_spacing)
         p.word_spacing_sigma = self._int_of(ui.spinBox, p.word_spacing_sigma)

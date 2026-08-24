@@ -65,6 +65,9 @@ class HandwritingParams:
     # ---- 输入 ----
     font_path: str = ""
     background_path: str = ""
+    # 多页文档背景（如导入的 PDF/DOCX 打印预览，每页一张）；
+    # 为空时所有页使用 background_path 单张背景
+    background_pages: list[str] | None = None
     text: str = ""
     paragraphs: list[Paragraph] | None = None  # 非空时启用段落渲染
     regions: list[TextRegion] | None = None    # 非空时在框选矩形内渲染（可与主文字并存）
@@ -146,6 +149,9 @@ class HandwritingParams:
             raise self.ValidationError("未指定背景图片")
         if not Path(self.background_path).is_file():
             raise self.ValidationError(f"背景图片不存在：{self.background_path}")
+        for i, page_bg in enumerate(self.background_pages or [], start=1):
+            if not Path(page_bg).is_file():
+                raise self.ValidationError(f"第 {i} 页背景文件不存在：{page_bg}")
         for name in (
             "font_size", "word_spacing", "line_spacing",
             "left_margin", "right_margin", "top_margin", "bottom_margin",

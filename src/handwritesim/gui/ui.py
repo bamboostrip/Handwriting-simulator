@@ -611,6 +611,17 @@ class Ui_Form(object):
         self.pushButton_2 = QtWidgets.QPushButton(panel)
         self.pushButton_2.setObjectName("pushButton_2")
         grid_file.addWidget(self.pushButton_2, 1, 2)
+        # 文档底图：PDF / Word 打印预览作为多页背景
+        self.label_doc = QtWidgets.QLabel(panel)
+        grid_file.addWidget(self.label_doc, 2, 0)
+        self.lineEdit_14 = QtWidgets.QLineEdit(panel)
+        self.lineEdit_14.setObjectName("lineEdit_14")
+        self.lineEdit_14.setReadOnly(True)
+        self.lineEdit_14.setPlaceholderText("可选：导入 PDF / Word 作为打印底图")
+        grid_file.addWidget(self.lineEdit_14, 2, 1)
+        self.pushButton_8 = QtWidgets.QPushButton(panel)
+        self.pushButton_8.setObjectName("pushButton_8")
+        grid_file.addWidget(self.pushButton_8, 2, 2)
         v.addLayout(grid_file)
 
         # 文字颜色（#RRGGBB 十六进制）
@@ -841,6 +852,12 @@ class Ui_Form(object):
         self.pushButton.setText(_translate("Form", "选择"))
         self.label_bg.setText(_translate("Form", "背景"))
         self.pushButton_2.setText(_translate("Form", "选择"))
+        self.label_doc.setText(_translate("Form", "文档底图"))
+        self.pushButton_8.setText(_translate("Form", "导入"))
+        self.pushButton_8.setToolTip(
+            "把 PDF / Word 文档的打印预览逐页作为背景（替换当前背景图片），"
+            "然后在预览上框选需要手写填写的位置"
+        )
         self.label_color.setText(_translate("Form", "文字颜色"))
         self.lineEdit_10.setText("#000000")
         self.lineEdit_10.setPlaceholderText("#000000")

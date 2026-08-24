@@ -235,18 +235,6 @@ def _draw_miswrite(draw: ImageDraw.ImageDraw, rng: random.Random, x: float, y_to
                               correct_ch, small_font, font)
 
 
-def _layout_page(
-    params: HandwritingParams,
-    rand: random.Random,
-    text: str,
-    start: int,
-) -> Tuple[np.ndarray, int]:
-    """排版一页文字，返回前景掩码（bool 数组）与本页消费的字符数。"""
-    with Image.open(params.background_path) as bg:
-        width, height = bg.size
-    return _layout_text(params, rand, text, start, width, height)
-
-
 def _layout_text(
     params: HandwritingParams,
     rand: random.Random,
@@ -620,18 +608,42 @@ class FastEngine:
         """排版用的随机源（逐字扰动）。"""
         return random.Random(self._seed)
 
+    # ------------------------------------------------------------------
+    # 背景（支持多页文档底图：每页一张，尺寸统一到首页）
+    # ------------------------------------------------------------------
+    def _background_count(self, params: HandwritingParams) -> int:
+        return len(params.background_pages) if params.background_pages else 0
+
+    def _first_background(self, params: HandwritingParams) -> np.ndarray:
+        """首页背景数组（决定画布尺寸与排版边界）。"""
+        if params.background_pages:
+            path = params.background_pages[0]
+        else:
+            path = params.background_path
+        return np.asarray(Image.open(path).convert("RGB"))
+
+    def _page_background(
+        self, params: HandwritingParams, index: int, size: tuple[int, int]
+    ) -> np.ndarray:
+        """第 index 页（0 基）的背景。
+
+        多页文档超出自身页数时复用最后一页；某页尺寸与首页不同时
+        统一缩放到首页尺寸（保证排版坐标一致）。
+        """
+        pages = params.background_pages
+        if pages:
+            path = pages[min(index, len(pages) - 1)]
+        else:
+            path = params.background_path
+        image = Image.open(path).convert("RGB")
+        if tuple(image.size) != tuple(size):
+            image = image.resize(size, Image.Resampling.LANCZOS)
+        return np.asarray(image)
+
     def render_preview(self, params: HandwritingParams) -> Image.Image:
         """仅渲染第一页，用于预览。"""
         params.validate()
-        if params.regions:
-            return next(self._pages_with_regions(params))
-        if params.paragraphs:
-            return next(self._paragraph_pages(params))
-        rand = self._new_rand()
-        mask, _ = _layout_page(params, rand, params.text, 0)
-        background = np.asarray(Image.open(params.background_path).convert("RGB"))
-        canvas = _perturb_mask(mask, params, self._rng, background)
-        return Image.fromarray(canvas, mode="RGB")
+        return next(self.generate_pages(params))
 
     def generate(self, params: HandwritingParams) -> Iterator[Image.Image]:
         """生成手写图序列（惰性迭代），与引擎接口一致。"""
@@ -693,7 +705,7 @@ class FastEngine:
         最大值。区域先合成、主文字后合成（重叠时主文字在上）；
         随机源消费顺序固定，相同 seed 下预览与导出逐像素一致。
         """
-        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        background = self._first_background(params)
         height, width = background.shape[:2]
         main_masks = self._main_page_masks(params, width, height)
 
@@ -724,10 +736,14 @@ class FastEngine:
             entries.append((rp, ox, oy, masks, max(1, int(region.page)) - 1))
 
         n_pages = max(
-            [len(main_masks)] + [e[4] + len(e[3]) for e in entries] + [1]
+            [len(main_masks), self._background_count(params)]
+            + [e[4] + len(e[3]) for e in entries]
+            + [1]
         )
         for page_index in range(n_pages):
-            canvas = background.copy()
+            canvas = self._page_background(
+                params, page_index, (width, height)
+            ).copy()
             for rp, ox, oy, masks, start_page in entries:
                 local = page_index - start_page
                 if not 0 <= local < len(masks):
@@ -740,10 +756,20 @@ class FastEngine:
 
     def _paragraph_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
         """按段落逐页渲染（逐行流式分页），在掩码基础上做笔画扰动。"""
-        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        background = self._first_background(params)
         height, width = background.shape[:2]
+        page_index = 0
         for page_canvas in self._paragraph_page_masks(params, width, height):
-            yield self._finalize(params, page_canvas, background)
+            yield self._finalize(
+                params, page_canvas,
+                self._page_background(params, page_index, (width, height)),
+            )
+            page_index += 1
+        # 文档底图剩余的空白页也输出，便于用户翻页浏览后再框选
+        while page_index < self._background_count(params):
+            canvas = self._page_background(params, page_index, (width, height))
+            yield Image.fromarray(canvas, mode="RGB")
+            page_index += 1
 
     def _paragraph_page_masks(
         self, params: HandwritingParams, width: int, height: int
@@ -803,15 +829,26 @@ class FastEngine:
         if params.paragraphs:
             yield from self._paragraph_pages(params)
             return
-        background = np.asarray(Image.open(params.background_path).convert("RGB"))
+        background = self._first_background(params)
+        height, width = background.shape[:2]
         rand = self._new_rand()
         start = 0
+        page_index = 0
         while True:
-            mask, start = _layout_page(params, rand, params.text, start)
-            canvas = _perturb_mask(mask, params, self._rng, background)
+            mask, start = _layout_text(params, rand, params.text, start, width, height)
+            canvas = _perturb_mask(
+                mask, params, self._rng,
+                self._page_background(params, page_index, (width, height)),
+            )
             yield Image.fromarray(canvas, mode="RGB")
+            page_index += 1
             if start >= len(params.text):
                 break
+        # 文档底图剩余的空白页也输出，便于用户翻页浏览后再框选
+        while page_index < self._background_count(params):
+            canvas = self._page_background(params, page_index, (width, height))
+            yield Image.fromarray(canvas, mode="RGB")
+            page_index += 1
 
     def save_all(self, params: HandwritingParams, out_dir: str | Path) -> list[Path]:
         """将全部手写页导出到 out_dir，返回文件路径列表。"""
