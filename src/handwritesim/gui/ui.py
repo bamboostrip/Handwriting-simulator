@@ -25,6 +25,17 @@ QTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox {
 QTextEdit:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: #79c267;
 }
+/* 仅扩大数字框上下按钮的点击热区（宽度 20px），其余外观保持系统默认 */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+}
 QPushButton {
     background: #dcf7e6;
     border: 1px solid #b7e4c9;
