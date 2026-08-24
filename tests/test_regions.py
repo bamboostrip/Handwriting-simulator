@@ -153,6 +153,58 @@ def test_region_bad_rect_fails_validation(tmp_path: Path) -> None:
         params.validate(require_text=True)
 
 
+def test_region_on_requested_page(tmp_path: Path) -> None:
+    """区域应渲染在指定页：page=2 的区域不出现在第一页。"""
+    params = _params(tmp_path)  # 无主文字，页数完全由区域决定
+    box1 = (40, 40, 220, 100)
+    box2 = (200, 150, 170, 110)
+    params.regions = [
+        TextRegion(x=box1[0], y=box1[1], w=box1[2], h=box1[3],
+                   text="第一页区域", printed=True),
+        TextRegion(x=box2[0], y=box2[1], w=box2[2], h=box2[3],
+                   text="第二页区域", printed=True, page=2),
+    ]
+    pages = list(HandwritingEngine(backend="fast").generate(params))
+    assert len(pages) >= 2
+    ink0 = _ink_mask(pages[0])
+    ink1 = _ink_mask(pages[1])
+
+    def inner(ink, box):
+        return ink[box[1]:box[1] + box[3], box[0]:box[0] + box[2]]
+
+    assert inner(ink0, box1).any(), "第一页区域未出现在第一页"
+    assert not inner(ink0, box2).any(), "第二页区域不应提前出现在第一页"
+    assert inner(ink1, box2).any(), "第二页区域未出现在第二页"
+    assert not inner(ink1, box1).any(), "第一页区域不应延续到第二页"
+
+
+def test_region_page_with_multi_page_main_text(tmp_path: Path) -> None:
+    """多页主文字 + 第 3 页区域：总页数覆盖区域末页，区域只落在第 3 页起。"""
+    params = _params(tmp_path, "主文字内容。" * 120)  # 足够多页
+    params.regions = [
+        TextRegion(x=30, y=200, w=340, h=80, text="第三页才出现的落款",
+                   printed=True, page=3)
+    ]
+    pages = list(HandwritingEngine(backend="fast").generate(params))
+    assert len(pages) >= 3
+    for index in (0, 1):
+        ink = _ink_mask(pages[index])
+        inner = ink[200:280, 30:370]
+        # 前两页该矩形内可能有主文字墨迹，但打印体区域整体不应出现——
+        # 用"区域内墨迹行数明显少于一整行高度"做宽松判定不可靠，
+        # 这里直接对比：第三页同位置墨迹必须显著多于前两页
+        ink3 = _ink_mask(pages[2])
+        assert int(ink3[200:280, 30:370].sum()) > int(ink[200:280, 30:370].sum())
+
+
+def test_region_page_validation(tmp_path: Path) -> None:
+    """页码必须从 1 开始。"""
+    params = _params(tmp_path)
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", page=0)]
+    with pytest.raises(HandwritingParams.ValidationError):
+        params.validate(require_text=True)
+
+
 def test_region_empty_text_skipped(tmp_path: Path) -> None:
     """空白文字的区域应被跳过，不参与渲染与页数计算。"""
     params = _params(tmp_path)

@@ -247,9 +247,11 @@ class MainWindow(QMainWindow):
             w, h = min(w, bw - x), min(h, bh - y)
         except Exception:  # noqa: BLE001
             pass
+        # 区域起始页 = 框选时正在查看的页（1 基）
         dlg = RegionDialog(
             self,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
+            page=self._preview_index + 1,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -262,6 +264,7 @@ class MainWindow(QMainWindow):
             font_path=dlg.region_font_path,
             printed=dlg.region_printed,
             font_size=dlg.region_font_size,
+            page=dlg.region_page,
         )
         try:
             region_font_check = (
@@ -324,24 +327,36 @@ class MainWindow(QMainWindow):
         ])
 
     def _on_region_hover(self, item) -> None:
-        """悬浮区域列表项：在预览图上高亮对应框选区域。"""
+        """悬浮区域列表项：在预览图上高亮对应框选区域。
+
+        仅当区域所在页与当前预览页一致时高亮，避免误导；
+        单击列表项会自动跳到区域所在页。
+        """
         if self._editing_row is not None:
             return  # 调整态下不叠加悬浮高亮，避免与调整框混淆
-        self._show_region_highlight(self._ui.region_list.row(item))
+        row = self._ui.region_list.row(item)
+        if not 0 <= row < len(self._regions):
+            return
+        if self._regions[row].page - 1 != self._preview_index:
+            return
+        self._show_region_highlight(row)
 
     def _on_region_item_clicked(self, item) -> None:
-        """单击列表项：在预览图上显示该区域的调整框，可拖动/缩放二次调整。"""
+        """单击列表项：跳到区域所在页并显示可拖动/缩放的调整框。"""
         row = self._ui.region_list.row(item)
         if not 0 <= row < len(self._regions):
             return
         from PyQt6.QtCore import QRect
 
+        region = self._regions[row]
         self._editing_row = row
-        r = self._regions[row]
+        # 区域在其他页时先翻过去，调整框才有意义
+        if region.page - 1 != self._preview_index:
+            self._show_page(region.page - 1)
         s = self._preview_scale_now()
         self._ui.label_11.begin_region_edit(QRect(
-            round(r.x / s), round(r.y / s),
-            max(1, round(r.w / s)), max(1, round(r.h / s)),
+            round(region.x / s), round(region.y / s),
+            max(1, round(region.w / s)), max(1, round(region.h / s)),
         ))
 
     def _on_region_geometry_changed(self, rect) -> None:
@@ -413,6 +428,7 @@ class MainWindow(QMainWindow):
             font_path=region.font_path,
             font_size=region.font_size,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
+            page=region.page,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -422,7 +438,14 @@ class MainWindow(QMainWindow):
         region.printed = dlg.region_printed
         region.font_path = dlg.region_font_path
         region.font_size = dlg.region_font_size
+        new_page = max(1, dlg.region_page)
+        page_changed = new_page != region.page
+        region.page = new_page
         self._refresh_region_list()
+        if page_changed and region.page - 1 != self._preview_index:
+            # 页码被改走时结束调整态，避免调整框留在旧页上误导
+            self._editing_row = None
+            self._ui.label_11.end_region_edit()
         self._preview_timer.start()
 
     # ------------------------------------------------------------------
@@ -766,6 +789,7 @@ class MainWindow(QMainWindow):
                 text=r.text, font_path=r.font_path,
                 printed=r.printed,
                 font_size=round(r.font_size * scale) if r.font_size else 0,
+                page=r.page,
             )
             for r in params.regions or []
         ]

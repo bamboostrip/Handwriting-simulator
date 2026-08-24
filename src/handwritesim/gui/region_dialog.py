@@ -24,6 +24,7 @@ class RegionDialog(QtWidgets.QDialog):
         font_path: str = "",
         font_size: int = 0,
         main_font_size: int = 36,
+        page: int = 1,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -43,6 +44,13 @@ class RegionDialog(QtWidgets.QDialog):
         self.combo_style.addItems(["手写体", "打印体"])
         self.combo_style.setCurrentIndex(1 if printed else 0)
         row_style.addWidget(self.combo_style, 1)
+        row_style.addSpacing(12)
+        row_style.addWidget(QtWidgets.QLabel("起始页", self))
+        self.spin_page = NoWheelSpinBox(self)
+        self.spin_page.setRange(1, 999)
+        self.spin_page.setValue(max(1, int(page)))
+        self.spin_page.setToolTip("区域文字从第几页开始渲染；放不下会延续到后续页")
+        row_style.addWidget(self.spin_page)
         v.addLayout(row_style)
 
         row_font = QtWidgets.QHBoxLayout()
@@ -119,3 +127,7 @@ class RegionDialog(QtWidgets.QDialog):
     @property
     def region_font_size(self) -> int:
         return self.spin_size.value()
+
+    @property
+    def region_page(self) -> int:
+        return self.spin_page.value()

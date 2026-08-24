@@ -687,16 +687,18 @@ class FastEngine:
     ) -> Iterator[Image.Image]:
         """框选区域模式：每个区域独立排版，与主文字合成后逐页输出。
 
-        页数取主文字与各区域所需页数的最大值；某区域文字超出其矩形时
-        流式延续到下一页的同一矩形（与整页排版行为一致）。区域先合成、
-        主文字后合成（重叠时主文字在上）；随机源消费顺序固定，
-        相同 seed 下预览与导出逐像素一致。
+        每个区域带起始页（region.page，1 基）：区域自己的第 k 页墨迹
+        合成到全局第 start + k 页（start = page - 1），文字超出矩形时
+        流式延续到后续页的同一矩形。总页数取主文字、各区域所需末页的
+        最大值。区域先合成、主文字后合成（重叠时主文字在上）；
+        随机源消费顺序固定，相同 seed 下预览与导出逐像素一致。
         """
         background = np.asarray(Image.open(params.background_path).convert("RGB"))
         height, width = background.shape[:2]
         main_masks = self._main_page_masks(params, width, height)
 
-        entries: list[tuple[HandwritingParams, int, int, list[np.ndarray]]] = []
+        # (区域局部参数, 偏移x, 偏移y, 区域逐页掩码, 全局起始页索引0基)
+        entries: list[tuple[HandwritingParams, int, int, list[np.ndarray], int]] = []
         for index, region in enumerate(params.regions or []):
             if not region.text.strip():
                 continue
@@ -719,15 +721,18 @@ class FastEngine:
                 # 区域矮到一行都放不下时 start 不再推进，直接结束避免死循环
                 if start >= len(region.text) or start == prev:
                     break
-            entries.append((rp, ox, oy, masks))
+            entries.append((rp, ox, oy, masks, max(1, int(region.page)) - 1))
 
-        n_pages = max([len(main_masks)] + [len(e[3]) for e in entries] + [1])
+        n_pages = max(
+            [len(main_masks)] + [e[4] + len(e[3]) for e in entries] + [1]
+        )
         for page_index in range(n_pages):
             canvas = background.copy()
-            for rp, ox, oy, masks in entries:
-                if page_index >= len(masks):
+            for rp, ox, oy, masks, start_page in entries:
+                local = page_index - start_page
+                if not 0 <= local < len(masks):
                     continue
-                ys, xs = _perturbed_positions(masks[page_index], rp, self._rng)
+                ys, xs = _perturbed_positions(masks[local], rp, self._rng)
                 canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
             if page_index < len(main_masks):
                 canvas = _perturb_mask(main_masks[page_index], params, self._rng, canvas)

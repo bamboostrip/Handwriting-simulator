@@ -37,6 +37,8 @@ class TextRegion:
 
     坐标为背景图原始像素坐标（与预览降采样无关，GUI 负责换算）。
     文字在矩形内自行换行，放不下时流式延续到下一页的同一矩形。
+    page 为区域起始页（1 基）：区域文字从该页开始渲染，超出矩形
+    时继续向后续页面延伸；默认 1 = 第一页。
     """
 
     x: int = 0                   # 区域左上角横坐标
@@ -47,11 +49,13 @@ class TextRegion:
     font_path: str = ""          # 区域独立字体；空 = 使用主字体
     printed: bool = False        # True = 打印体（零扰动、规整排版）
     font_size: int = 0           # 区域字号；0 = 跟随主设置
+    page: int = 1                # 起始页（1 基）；1 = 第一页
 
     def label(self, index: int) -> str:
         """区域列表里的一行摘要。"""
         style = "打印" if self.printed else "手写"
-        return f"{index}. {style} {len(self.text)}字 ({self.x},{self.y} {self.w}×{self.h})"
+        page = f" 第{self.page}页" if self.page > 1 else ""
+        return f"{index}. {style}{page} {len(self.text)}字 ({self.x},{self.y} {self.w}×{self.h})"
 
 
 @dataclass
@@ -159,6 +163,8 @@ class HandwritingParams:
                 raise self.ValidationError(f"文字区域 {i} 的宽高必须为正")
             if region.x < 0 or region.y < 0:
                 raise self.ValidationError(f"文字区域 {i} 的坐标不能为负")
+            if region.page < 1:
+                raise self.ValidationError(f"文字区域 {i} 的页码必须从 1 开始")
             if region.font_path and not Path(region.font_path).is_file():
                 raise self.ValidationError(f"文字区域 {i} 的字体文件不存在：{region.font_path}")
             if region.font_size < 0:
