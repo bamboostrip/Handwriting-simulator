@@ -36,9 +36,8 @@ class TextRegion:
     """页面上一个框选文字区域（实验特性：手写/打印混排）。
 
     坐标为背景图原始像素坐标（与预览降采样无关，GUI 负责换算）。
-    文字在矩形内自行换行，放不下时流式延续到下一页的同一矩形。
-    page 为区域起始页（1 基）：区域文字从该页开始渲染，超出矩形
-    时继续向后续页面延伸；默认 1 = 第一页。
+    文字在矩形内自行换行，仅在指定所在页渲染，超出框选范围的内容自然截断。
+    page 为区域所在页（1 基）：1 = 第一页。
     """
 
     x: int = 0                   # 区域左上角横坐标
@@ -49,7 +48,49 @@ class TextRegion:
     font_path: str = ""          # 区域独立字体；空 = 使用主字体
     printed: bool = False        # True = 打印体（零扰动、规整排版）
     font_size: int = 0           # 区域字号；0 = 跟随主设置
-    page: int = 1                # 起始页（1 基）；1 = 第一页
+    page: int = 1                # 所在页（1 基）；1 = 第一页
+    align: str = "left"          # 对齐方式："left" | "center" | "right"
+    indent_em: float = 0.0       # 首行缩进（字符数 em；0 = 无）
+    paragraphs: list[Paragraph] | None = None  # 区域内各段落排版信息（各段独立对齐与缩进）
+
+    # ---- 逐区域排版/扰动覆盖项（None = 跟随主设置）----
+    word_spacing: int | None = None
+    line_spacing: int | None = None
+    font_size_sigma: int | None = None
+    word_spacing_sigma: int | None = None
+    line_spacing_sigma: int | None = None
+    perturb_x_sigma: int | None = None
+    perturb_y_sigma: int | None = None
+    perturb_theta_sigma: float | None = None
+    miswrite_rate: float | None = None
+    miswrite_strikeout_style: str | None = None  # "line" | "double_line" | "slash" | "cross"
+    color: str | None = None                     # 文字颜色覆盖（#RRGGBB 十六进制）
+
+    # ---- 区域内边距（像素；None 或 0 = 紧贴框边界，默认 0）----
+    margin_top: int | None = None
+    margin_bottom: int | None = None
+    margin_left: int | None = None
+    margin_right: int | None = None
+
+    def has_overrides(self) -> bool:
+        """是否设置了任意一项逐区域覆盖（排版、扰动、错字、颜色、内边距）。"""
+        return (
+            self.word_spacing is not None
+            or self.line_spacing is not None
+            or self.font_size_sigma is not None
+            or self.word_spacing_sigma is not None
+            or self.line_spacing_sigma is not None
+            or self.perturb_x_sigma is not None
+            or self.perturb_y_sigma is not None
+            or self.perturb_theta_sigma is not None
+            or self.miswrite_rate is not None
+            or self.miswrite_strikeout_style is not None
+            or self.color is not None
+            or (self.margin_top is not None and self.margin_top > 0)
+            or (self.margin_bottom is not None and self.margin_bottom > 0)
+            or (self.margin_left is not None and self.margin_left > 0)
+            or (self.margin_right is not None and self.margin_right > 0)
+        )
 
     def label(self, index: int) -> str:
         """区域列表里的一行摘要。"""
@@ -179,6 +220,39 @@ class HandwritingParams:
                 raise self.ValidationError(f"文字区域 {i} 的字体文件不存在：{region.font_path}")
             if region.font_size < 0:
                 raise self.ValidationError(f"文字区域 {i} 的字号不能为负")
+            if region.align not in ("left", "center", "right"):
+                raise self.ValidationError(
+                    f"文字区域 {i} 的未知对齐方式：{region.align!r}，可选 left/center/right"
+                )
+            if region.indent_em < 0:
+                raise self.ValidationError(f"文字区域 {i} 的首行缩进不能为负")
+            for m_name in ("margin_top", "margin_bottom", "margin_left", "margin_right"):
+                m_val = getattr(region, m_name)
+                if m_val is not None and m_val < 0:
+                    raise self.ValidationError(f"文字区域 {i} 的 {m_name} 不能为负")
+            for s_name in (
+                "word_spacing", "line_spacing", "word_spacing_sigma",
+                "line_spacing_sigma", "font_size_sigma", "perturb_x_sigma",
+                "perturb_y_sigma",
+            ):
+                s_val = getattr(region, s_name)
+                if s_val is not None and s_val < 0:
+                    raise self.ValidationError(f"文字区域 {i} 的 {s_name} 不能为负")
+            if region.perturb_theta_sigma is not None and region.perturb_theta_sigma < 0:
+                raise self.ValidationError(f"文字区域 {i} 的 perturb_theta_sigma 不能为负")
+            if region.miswrite_rate is not None and not 0.0 <= region.miswrite_rate <= 1.0:
+                raise self.ValidationError(f"文字区域 {i} 的 miswrite_rate 必须在 0~1 之间")
+            if region.miswrite_strikeout_style is not None and region.miswrite_strikeout_style not in (
+                "line", "double_line", "slash", "cross"
+            ):
+                raise self.ValidationError(
+                    f"文字区域 {i} 的未知涂改方式：{region.miswrite_strikeout_style!r}，可选 line/double_line/slash/cross"
+                )
+            if region.color is not None:
+                try:
+                    parse_color(region.color)
+                except ValueError as exc:
+                    raise self.ValidationError(f"文字区域 {i} 的颜色格式无效：{exc}") from exc
         if self.miswrite_rewrite_mode not in ("above", "rewrite"):
             raise self.ValidationError(
                 f"未知重写方式：{self.miswrite_rewrite_mode!r}，可选 above/rewrite"
@@ -263,6 +337,20 @@ class HandwritingParams:
                 p if isinstance(p, Paragraph) else Paragraph(**p)
                 for p in clean["paragraphs"]
             ]
+        if isinstance(clean.get("regions"), list):
+            clean_regions = []
+            for r in clean["regions"]:
+                if isinstance(r, TextRegion):
+                    clean_regions.append(r)
+                elif isinstance(r, dict):
+                    r_dict = dict(r)
+                    if isinstance(r_dict.get("paragraphs"), list):
+                        r_dict["paragraphs"] = [
+                            p if isinstance(p, Paragraph) else Paragraph(**p)
+                            for p in r_dict["paragraphs"]
+                        ]
+                    clean_regions.append(TextRegion(**r_dict))
+            clean["regions"] = clean_regions
         return cls(**clean)
 
     def __str__(self) -> str:  # 便于日志

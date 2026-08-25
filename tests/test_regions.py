@@ -225,3 +225,112 @@ def test_region_clamped_to_page(tmp_path: Path) -> None:
     ]
     image = HandwritingEngine(backend="fast").render_preview(params)
     assert image.size == (400, 300)
+
+
+def test_region_model_defaults_and_has_overrides() -> None:
+    """测试 TextRegion 默认值与 has_overrides 判定。"""
+    from handwritesim.core.models import Paragraph
+
+    r = TextRegion(x=10, y=10, w=100, h=50, text="默认区域")
+    assert r.align == "left"
+    assert r.indent_em == 0.0
+    assert r.paragraphs is None
+    assert r.margin_top is None
+    assert r.margin_bottom is None
+    assert r.margin_left is None
+    assert r.margin_right is None
+    assert r.word_spacing is None
+    assert r.color is None
+    assert not r.has_overrides()
+
+    # 设置内边距
+    r_margin = TextRegion(x=10, y=10, w=100, h=50, margin_left=10)
+    assert r_margin.has_overrides()
+
+    # 设置覆盖项
+    r_color = TextRegion(x=10, y=10, w=100, h=50, color="#ff0000")
+    assert r_color.has_overrides()
+
+    r_miswrite = TextRegion(x=10, y=10, w=100, h=50, miswrite_rate=0.05)
+    assert r_miswrite.has_overrides()
+
+    r_para = TextRegion(
+        x=10, y=10, w=100, h=50,
+        paragraphs=[Paragraph(text="第1段", align="center", first_line_indent=20)]
+    )
+    assert len(r_para.paragraphs) == 1
+
+
+def test_region_model_validation(tmp_path: Path) -> None:
+    """测试 TextRegion 各新增字段的参数校验。"""
+    params = _params(tmp_path)
+
+    # 非法对齐方式
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", align="invalid")]
+    with pytest.raises(HandwritingParams.ValidationError, match="对齐方式"):
+        params.validate(require_text=True)
+
+    # 负数边距
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", margin_top=-5)]
+    with pytest.raises(HandwritingParams.ValidationError, match="margin_top"):
+        params.validate(require_text=True)
+
+    # 非法颜色
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", color="12345")]
+    with pytest.raises(HandwritingParams.ValidationError, match="颜色值"):
+        params.validate(require_text=True)
+
+    # 非法错字率
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", miswrite_rate=1.5)]
+    with pytest.raises(HandwritingParams.ValidationError, match="miswrite_rate"):
+        params.validate(require_text=True)
+
+    # 非法涂改方式
+    params.regions = [TextRegion(x=10, y=10, w=100, h=60, text="字", miswrite_strikeout_style="wave")]
+    with pytest.raises(HandwritingParams.ValidationError, match="涂改方式"):
+        params.validate(require_text=True)
+
+    # 合法全参验证
+    params.regions = [
+        TextRegion(
+            x=10, y=10, w=100, h=60, text="字",
+            align="center",
+            indent_em=2.0,
+            margin_top=10, margin_bottom=10, margin_left=10, margin_right=10,
+            word_spacing=6, line_spacing=50,
+            word_spacing_sigma=1, line_spacing_sigma=1, font_size_sigma=1,
+            perturb_x_sigma=1, perturb_y_sigma=1, perturb_theta_sigma=0.02,
+            miswrite_rate=0.1, miswrite_strikeout_style="slash",
+            color="#003366",
+        )
+    ]
+    params.validate(require_text=True)
+
+
+def test_region_model_serialization(tmp_path: Path) -> None:
+    """测试包含扩展字段的 TextRegion 序列化与反序列化。"""
+    from handwritesim.core.models import Paragraph
+
+    p = _params(tmp_path)
+    p.regions = [
+        TextRegion(
+            x=15, y=25, w=120, h=80, text="测试",
+            align="right",
+            indent_em=1.5,
+            paragraphs=[Paragraph(text="行1", align="right", first_line_indent=15)],
+            margin_left=8,
+            color="#1a1a8c",
+        )
+    ]
+    d = p.to_dict()
+    restored = HandwritingParams.from_dict(d)
+    assert len(restored.regions) == 1
+    r = restored.regions[0]
+    assert r.x == 15
+    assert r.align == "right"
+    assert r.indent_em == 1.5
+    assert r.margin_left == 8
+    assert r.color == "#1a1a8c"
+    assert len(r.paragraphs) == 1
+    assert r.paragraphs[0].text == "行1"
+
