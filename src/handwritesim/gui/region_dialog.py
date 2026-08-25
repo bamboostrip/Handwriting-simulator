@@ -3,6 +3,7 @@
 支持多段落独立排版（左/中/右对齐、首行缩进、导入 docx）、基础属性（手写/打印、
 所在页、打印字体、字号）、以及折叠面板「排版与扰动覆盖」（字距/行距/字号及各自
 随机扰动、笔画扰动、写错字、文字颜色、4向内边距）。
+主体内容置于滚动区域内并限制最大高度，避免屏幕高度不足时显示不全。
 对齐 Rust 版 RegionDialog.vue 与 RegionTextEditor.vue。
 """
 
@@ -50,10 +51,25 @@ class RegionDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(480)
+        self.resize(520, 560)
         self._main_font_size = main_font_size
 
-        v = QtWidgets.QVBoxLayout(self)
+        root_layout = QtWidgets.QVBoxLayout(self)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
+
+        # --------------------------------------------------------------
+        # 滚动区域：内容过多时支持纵向滚动，避免撑出屏幕
+        # --------------------------------------------------------------
+        self.scroll_area = QtWidgets.QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        scroll_content = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(scroll_content)
+        v.setContentsMargins(0, 0, 6, 0)
         v.setSpacing(8)
 
         # --------------------------------------------------------------
@@ -62,15 +78,15 @@ class RegionDialog(QtWidgets.QDialog):
         row_tools = QtWidgets.QHBoxLayout()
         row_tools.setSpacing(6)
 
-        self.btn_align_left = QtWidgets.QPushButton("左对齐", self)
+        self.btn_align_left = QtWidgets.QPushButton("左对齐", scroll_content)
         self.btn_align_left.setCheckable(True)
-        self.btn_align_center = QtWidgets.QPushButton("居中", self)
+        self.btn_align_center = QtWidgets.QPushButton("居中", scroll_content)
         self.btn_align_center.setCheckable(True)
-        self.btn_align_right = QtWidgets.QPushButton("右对齐", self)
+        self.btn_align_right = QtWidgets.QPushButton("右对齐", scroll_content)
         self.btn_align_right.setCheckable(True)
-        self.btn_indent = QtWidgets.QPushButton("首行缩进", self)
+        self.btn_indent = QtWidgets.QPushButton("首行缩进", scroll_content)
         self.btn_indent.setCheckable(True)
-        self.btn_import_docx = QtWidgets.QPushButton("导入 docx", self)
+        self.btn_import_docx = QtWidgets.QPushButton("导入 docx", scroll_content)
 
         row_tools.addWidget(self.btn_align_left)
         row_tools.addWidget(self.btn_align_center)
@@ -81,14 +97,14 @@ class RegionDialog(QtWidgets.QDialog):
         v.addLayout(row_tools)
 
         # 当前行状态提示
-        self.label_row_status = QtWidgets.QLabel(self)
+        self.label_row_status = QtWidgets.QLabel(scroll_content)
         self.label_row_status.setStyleSheet("color: #6b7a70; font-size: 11px;")
         v.addWidget(self.label_row_status)
 
         # 富文本段落编辑器
-        self.text_edit = QtWidgets.QTextEdit(self)
-        self.text_edit.setMinimumHeight(90)
-        self.text_edit.setMaximumHeight(160)
+        self.text_edit = QtWidgets.QTextEdit(scroll_content)
+        self.text_edit.setMinimumHeight(85)
+        self.text_edit.setMaximumHeight(150)
         self.text_edit.setPlaceholderText(
             "输入该区域内要生成的文字，支持多行；回车分段，上方按钮设置当前行对齐/缩进；留空则放弃该区域"
         )
@@ -113,9 +129,9 @@ class RegionDialog(QtWidgets.QDialog):
         grid_basic.setVerticalSpacing(6)
 
         # 样式
-        grid_basic.addWidget(QtWidgets.QLabel("样式", self), 0, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("样式", scroll_content), 0, 0)
         row_style = QtWidgets.QHBoxLayout()
-        self.combo_style = NoWheelComboBox(self)
+        self.combo_style = NoWheelComboBox(scroll_content)
         self.combo_style.addItems(["手写体", "打印体"])
         self.combo_style.setCurrentIndex(1 if printed else 0)
         row_style.addWidget(self.combo_style)
@@ -123,41 +139,41 @@ class RegionDialog(QtWidgets.QDialog):
         grid_basic.addLayout(row_style, 0, 1)
 
         # 所在页
-        grid_basic.addWidget(QtWidgets.QLabel("所在页", self), 1, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("所在页", scroll_content), 1, 0)
         row_page = QtWidgets.QHBoxLayout()
-        self.spin_page = NoWheelSpinBox(self)
+        self.spin_page = NoWheelSpinBox(scroll_content)
         self.spin_page.setRange(1, 999)
         self.spin_page.setValue(max(1, int(page)))
         self.spin_page.setToolTip("该文字区域在第几页渲染（超出框选范围的内容将自然截断）")
         row_page.addWidget(self.spin_page)
-        lbl_page_hint = QtWidgets.QLabel("仅在指定页渲染，超出框选范围的内容自然截断", self)
+        lbl_page_hint = QtWidgets.QLabel("仅在指定页渲染，超出框选范围的内容自然截断", scroll_content)
         lbl_page_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
         row_page.addWidget(lbl_page_hint)
         row_page.addStretch(1)
         grid_basic.addLayout(row_page, 1, 1)
 
         # 打印字体
-        self.label_font = QtWidgets.QLabel("打印字体", self)
+        self.label_font = QtWidgets.QLabel("打印字体", scroll_content)
         grid_basic.addWidget(self.label_font, 2, 0)
         row_font = QtWidgets.QHBoxLayout()
-        self.edit_font = QtWidgets.QLineEdit(self)
+        self.edit_font = QtWidgets.QLineEdit(scroll_content)
         self.edit_font.setPlaceholderText("留空使用主字体")
         self.edit_font.setText(font_path)
         row_font.addWidget(self.edit_font, 1)
-        self.btn_font = QtWidgets.QPushButton("选择", self)
+        self.btn_font = QtWidgets.QPushButton("选择", scroll_content)
         row_font.addWidget(self.btn_font)
         grid_basic.addLayout(row_font, 2, 1)
 
         # 字号
-        grid_basic.addWidget(QtWidgets.QLabel("字号", self), 3, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("字号", scroll_content), 3, 0)
         row_size = QtWidgets.QHBoxLayout()
-        self.spin_size = NoWheelSpinBox(self)
+        self.spin_size = NoWheelSpinBox(scroll_content)
         self.spin_size.setRange(0, 300)
         self.spin_size.setValue(int(font_size))
         self.spin_size.setSpecialValueText("跟随主设置")
         self.spin_size.setToolTip("0 表示使用主界面的字体大小")
         row_size.addWidget(self.spin_size)
-        lbl_size_hint = QtWidgets.QLabel(f"主字号当前为 {main_font_size}，0 表示跟随", self)
+        lbl_size_hint = QtWidgets.QLabel(f"主字号当前为 {main_font_size}，0 表示跟随", scroll_content)
         lbl_size_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
         row_size.addWidget(lbl_size_hint)
         row_size.addStretch(1)
@@ -168,16 +184,16 @@ class RegionDialog(QtWidgets.QDialog):
         # --------------------------------------------------------------
         # 折叠面板：排版与扰动覆盖
         # --------------------------------------------------------------
-        self.btn_toggle_adv = QtWidgets.QPushButton(self)
+        self.btn_toggle_adv = QtWidgets.QPushButton(scroll_content)
         self.btn_toggle_adv.setStyleSheet(
             "text-align: left; font-weight: bold; background: #eef5f0; border: 1px solid #d3ded6;"
         )
         v.addWidget(self.btn_toggle_adv)
 
-        self.widget_adv = QtWidgets.QWidget(self)
+        self.widget_adv = QtWidgets.QWidget(scroll_content)
         v_adv = QtWidgets.QVBoxLayout(self.widget_adv)
-        v_adv.setContentsMargins(0, 4, 0, 0)
-        v_adv.setSpacing(8)
+        v_adv.setContentsMargins(0, 2, 0, 0)
+        v_adv.setSpacing(6)
 
         lbl_adv_tip = QtWidgets.QLabel("留空即跟随全局设置；打印体下扰动 / 错字类覆盖不生效。", self.widget_adv)
         lbl_adv_tip.setStyleSheet("color: #6b7a70; font-size: 11px;")
@@ -187,7 +203,7 @@ class RegionDialog(QtWidgets.QDialog):
         grp_layout = QtWidgets.QGroupBox("排版参数", self.widget_adv)
         g_layout = QtWidgets.QGridLayout(grp_layout)
         g_layout.setHorizontalSpacing(10)
-        g_layout.setVerticalSpacing(6)
+        g_layout.setVerticalSpacing(4)
 
         g_layout.addWidget(QtWidgets.QLabel("数值", grp_layout), 0, 1)
         g_layout.addWidget(QtWidgets.QLabel("随机扰动", grp_layout), 0, 2)
@@ -196,10 +212,6 @@ class RegionDialog(QtWidgets.QDialog):
         self.spin_ws = NoWheelSpinBox(grp_layout)
         self.spin_ws.setRange(0, 100)
         self.spin_ws.setSpecialValueText("跟随主设置")
-        if word_spacing is not None:
-            self.spin_ws.setValue(word_spacing)
-        else:
-            self.spin_ws.setValue(0)
         self._set_spinbox_optional(self.spin_ws, word_spacing)
         g_layout.addWidget(self.spin_ws, 1, 1)
 
@@ -235,7 +247,7 @@ class RegionDialog(QtWidgets.QDialog):
         grp_perturb = QtWidgets.QGroupBox("笔画扰动", self.widget_adv)
         g_perturb = QtWidgets.QGridLayout(grp_perturb)
         g_perturb.setHorizontalSpacing(10)
-        g_perturb.setVerticalSpacing(6)
+        g_perturb.setVerticalSpacing(4)
 
         g_perturb.addWidget(QtWidgets.QLabel("水平位移 σ", grp_perturb), 0, 0)
         self.spin_px_sigma = NoWheelSpinBox(grp_perturb)
@@ -269,7 +281,7 @@ class RegionDialog(QtWidgets.QDialog):
         grp_miswrite = QtWidgets.QGroupBox("写错字", self.widget_adv)
         g_miswrite = QtWidgets.QGridLayout(grp_miswrite)
         g_miswrite.setHorizontalSpacing(10)
-        g_miswrite.setVerticalSpacing(6)
+        g_miswrite.setVerticalSpacing(4)
 
         g_miswrite.addWidget(QtWidgets.QLabel("错字率", grp_miswrite), 0, 0)
         self.spin_miswrite_rate = NoWheelDoubleSpinBox(grp_miswrite)
@@ -315,7 +327,7 @@ class RegionDialog(QtWidgets.QDialog):
         grp_margins = QtWidgets.QGroupBox("边距（像素）", self.widget_adv)
         g_margins = QtWidgets.QGridLayout(grp_margins)
         g_margins.setHorizontalSpacing(10)
-        g_margins.setVerticalSpacing(6)
+        g_margins.setVerticalSpacing(4)
 
         g_margins.addWidget(QtWidgets.QLabel("上边距", grp_margins), 0, 0)
         self.spin_m_top = NoWheelSpinBox(grp_margins)
@@ -354,8 +366,11 @@ class RegionDialog(QtWidgets.QDialog):
         )
         self._update_adv_toggle_ui()
 
+        self.scroll_area.setWidget(scroll_content)
+        root_layout.addWidget(self.scroll_area, 1)
+
         # --------------------------------------------------------------
-        # 对话框底部按钮
+        # 对话框底部按钮（固定在底部，不参与滚动）
         # --------------------------------------------------------------
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -364,7 +379,7 @@ class RegionDialog(QtWidgets.QDialog):
         )
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
-        v.addWidget(buttons)
+        root_layout.addWidget(buttons, 0)
 
         # --------------------------------------------------------------
         # 信号绑定
@@ -383,6 +398,15 @@ class RegionDialog(QtWidgets.QDialog):
 
         self._update_font_enabled()
         self._update_row_status_and_toolbar()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        """限制对话框最大高度不超过当前屏幕的 85%，确保在小屏幕/低分辨率下完整可用。"""
+        super().showEvent(event)
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        if screen:
+            avail_h = screen.availableGeometry().height()
+            max_h = int(avail_h * 0.85)
+            self.setMaximumHeight(max(400, max_h))
 
     # ------------------------------------------------------------------
     # 辅助工具
@@ -417,7 +441,6 @@ class RegionDialog(QtWidgets.QDialog):
     def _toggle_adv(self) -> None:
         self._adv_expanded = not self._adv_expanded
         self._update_adv_toggle_ui()
-        self.adjustSize()
 
     def _update_adv_toggle_ui(self) -> None:
         has_custom = bool(
