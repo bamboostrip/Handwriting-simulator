@@ -51,16 +51,16 @@ class RegionDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(480)
-        self.resize(520, 560)
+        self.setMinimumWidth(560)
+        self.resize(600, 580)
         self._main_font_size = main_font_size
 
         root_layout = QtWidgets.QVBoxLayout(self)
-        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(8)
 
         # --------------------------------------------------------------
-        # 滚动区域：内容过多时支持纵向滚动，避免撑出屏幕
+        # 滚动区域：内容过多时支持纵向滚动，右侧留足边距避免遮挡
         # --------------------------------------------------------------
         self.scroll_area = QtWidgets.QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
@@ -69,7 +69,7 @@ class RegionDialog(QtWidgets.QDialog):
 
         scroll_content = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(scroll_content)
-        v.setContentsMargins(0, 0, 6, 0)
+        v.setContentsMargins(0, 0, 14, 0)
         v.setSpacing(8)
 
         # --------------------------------------------------------------
@@ -127,6 +127,7 @@ class RegionDialog(QtWidgets.QDialog):
         grid_basic = QtWidgets.QGridLayout()
         grid_basic.setHorizontalSpacing(10)
         grid_basic.setVerticalSpacing(6)
+        grid_basic.setColumnStretch(1, 1)
 
         # 样式
         grid_basic.addWidget(QtWidgets.QLabel("样式", scroll_content), 0, 0)
@@ -148,8 +149,8 @@ class RegionDialog(QtWidgets.QDialog):
         row_page.addWidget(self.spin_page)
         lbl_page_hint = QtWidgets.QLabel("仅在指定页渲染，超出框选范围的内容自然截断", scroll_content)
         lbl_page_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
-        row_page.addWidget(lbl_page_hint)
-        row_page.addStretch(1)
+        lbl_page_hint.setWordWrap(True)
+        row_page.addWidget(lbl_page_hint, 1)
         grid_basic.addLayout(row_page, 1, 1)
 
         # 打印字体
@@ -175,8 +176,8 @@ class RegionDialog(QtWidgets.QDialog):
         row_size.addWidget(self.spin_size)
         lbl_size_hint = QtWidgets.QLabel(f"主字号当前为 {main_font_size}，0 表示跟随", scroll_content)
         lbl_size_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
-        row_size.addWidget(lbl_size_hint)
-        row_size.addStretch(1)
+        lbl_size_hint.setWordWrap(True)
+        row_size.addWidget(lbl_size_hint, 1)
         grid_basic.addLayout(row_size, 3, 1)
 
         v.addLayout(grid_basic)
@@ -204,6 +205,8 @@ class RegionDialog(QtWidgets.QDialog):
         g_layout = QtWidgets.QGridLayout(grp_layout)
         g_layout.setHorizontalSpacing(10)
         g_layout.setVerticalSpacing(4)
+        g_layout.setColumnStretch(1, 1)
+        g_layout.setColumnStretch(2, 1)
 
         g_layout.addWidget(QtWidgets.QLabel("数值", grp_layout), 0, 1)
         g_layout.addWidget(QtWidgets.QLabel("随机扰动", grp_layout), 0, 2)
@@ -248,6 +251,8 @@ class RegionDialog(QtWidgets.QDialog):
         g_perturb = QtWidgets.QGridLayout(grp_perturb)
         g_perturb.setHorizontalSpacing(10)
         g_perturb.setVerticalSpacing(4)
+        g_perturb.setColumnStretch(1, 1)
+        g_perturb.setColumnStretch(3, 1)
 
         g_perturb.addWidget(QtWidgets.QLabel("水平位移 σ", grp_perturb), 0, 0)
         self.spin_px_sigma = NoWheelSpinBox(grp_perturb)
@@ -282,6 +287,8 @@ class RegionDialog(QtWidgets.QDialog):
         g_miswrite = QtWidgets.QGridLayout(grp_miswrite)
         g_miswrite.setHorizontalSpacing(10)
         g_miswrite.setVerticalSpacing(4)
+        g_miswrite.setColumnStretch(1, 1)
+        g_miswrite.setColumnStretch(3, 1)
 
         g_miswrite.addWidget(QtWidgets.QLabel("错字率", grp_miswrite), 0, 0)
         self.spin_miswrite_rate = NoWheelDoubleSpinBox(grp_miswrite)
@@ -328,6 +335,8 @@ class RegionDialog(QtWidgets.QDialog):
         g_margins = QtWidgets.QGridLayout(grp_margins)
         g_margins.setHorizontalSpacing(10)
         g_margins.setVerticalSpacing(4)
+        g_margins.setColumnStretch(1, 1)
+        g_margins.setColumnStretch(3, 1)
 
         g_margins.addWidget(QtWidgets.QLabel("上边距", grp_margins), 0, 0)
         self.spin_m_top = NoWheelSpinBox(grp_margins)
