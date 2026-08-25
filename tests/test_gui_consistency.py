@@ -157,3 +157,50 @@ def test_preset_combo_wheel_does_not_switch(qapp, tmp_path: Path) -> None:
     combo.setCurrentIndex(0)
     combo.wheelEvent(event)
     assert combo.currentIndex() == 0  # 滚轮不得改变当前项
+
+
+def test_region_dialog_features(qapp) -> None:
+    """测试 RegionDialog 的参数回填、段落工具栏与高级覆盖面板。"""
+    from handwritesim.core.models import Paragraph
+    from handwritesim.gui.region_dialog import RegionDialog
+
+    dlg = RegionDialog(
+        title="编辑文字区域",
+        text="段落一\n段落二",
+        paragraphs=[
+            Paragraph(text="段落一", align="center", first_line_indent=40),
+            Paragraph(text="段落二", align="right", first_line_indent=0),
+        ],
+        printed=True,
+        font_path="dummy.ttf",
+        font_size=28,
+        page=2,
+        word_spacing=10,
+        line_spacing=50,
+        perturb_theta_sigma=0.08,
+        miswrite_rate=0.15,
+        miswrite_strikeout_style="slash",
+        color="#ff0000",
+        margin_top=12,
+        margin_left=15,
+    )
+
+    assert dlg.region_printed is True
+    assert dlg.region_font_size == 28
+    assert dlg.region_page == 2
+    assert dlg.region_word_spacing == 10
+    assert dlg.region_line_spacing == 50
+    assert dlg.region_perturb_theta_sigma == 0.08
+    assert dlg.region_miswrite_rate == 0.15
+    assert dlg.region_miswrite_strikeout_style == "slash"
+    assert dlg.region_color == "#ff0000"
+    assert dlg.region_margin_top == 12
+    assert dlg.region_margin_left == 15
+
+    paras = dlg.region_paragraphs
+    assert len(paras) == 2
+    assert paras[0].text == "段落一"
+    assert paras[0].align == "center"
+    assert paras[1].text == "段落二"
+    assert paras[1].align == "right"
+
