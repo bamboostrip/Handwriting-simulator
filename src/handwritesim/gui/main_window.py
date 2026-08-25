@@ -253,7 +253,6 @@ class MainWindow(QMainWindow):
             w, h = min(w, bw - x), min(h, bh - y)
         except Exception:  # noqa: BLE001
             pass
-        # 区域起始页 = 框选时正在查看的页（1 基）
         dlg = RegionDialog(
             self,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
@@ -271,6 +270,24 @@ class MainWindow(QMainWindow):
             printed=dlg.region_printed,
             font_size=dlg.region_font_size,
             page=dlg.region_page,
+            align=dlg.region_align,
+            indent_em=dlg.region_indent_em,
+            paragraphs=dlg.region_paragraphs,
+            word_spacing=dlg.region_word_spacing,
+            line_spacing=dlg.region_line_spacing,
+            font_size_sigma=dlg.region_font_size_sigma,
+            word_spacing_sigma=dlg.region_word_spacing_sigma,
+            line_spacing_sigma=dlg.region_line_spacing_sigma,
+            perturb_x_sigma=dlg.region_perturb_x_sigma,
+            perturb_y_sigma=dlg.region_perturb_y_sigma,
+            perturb_theta_sigma=dlg.region_perturb_theta_sigma,
+            miswrite_rate=dlg.region_miswrite_rate,
+            miswrite_strikeout_style=dlg.region_miswrite_strikeout_style,
+            color=dlg.region_color,
+            margin_top=dlg.region_margin_top,
+            margin_bottom=dlg.region_margin_bottom,
+            margin_left=dlg.region_margin_left,
+            margin_right=dlg.region_margin_right,
         )
         try:
             region_font_check = (
@@ -290,11 +307,17 @@ class MainWindow(QMainWindow):
 
     def _refresh_region_list(self) -> None:
         """刷新区域列表（红框不再常驻，仅悬浮列表项时临时高亮）。"""
+        from PyQt6.QtWidgets import QListWidgetItem
+
         lst = self._ui.region_list
         lst.blockSignals(True)
         lst.clear()
         for i, region in enumerate(self._regions, start=1):
-            lst.addItem(region.label(i))
+            tag = " [已自定义]" if region.has_overrides() else ""
+            item = QListWidgetItem(f"{region.label(i)}{tag}")
+            if region.has_overrides():
+                item.setToolTip("包含独立自定义排版/扰动/颜色/边距覆盖项")
+            lst.addItem(item)
         lst.blockSignals(False)
 
     def _preview_scale_now(self) -> float:
@@ -435,6 +458,24 @@ class MainWindow(QMainWindow):
             font_size=region.font_size,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
             page=region.page,
+            align=region.align,
+            indent_em=region.indent_em,
+            paragraphs=region.paragraphs,
+            word_spacing=region.word_spacing,
+            line_spacing=region.line_spacing,
+            font_size_sigma=region.font_size_sigma,
+            word_spacing_sigma=region.word_spacing_sigma,
+            line_spacing_sigma=region.line_spacing_sigma,
+            perturb_x_sigma=region.perturb_x_sigma,
+            perturb_y_sigma=region.perturb_y_sigma,
+            perturb_theta_sigma=region.perturb_theta_sigma,
+            miswrite_rate=region.miswrite_rate,
+            miswrite_strikeout_style=region.miswrite_strikeout_style,
+            color=region.color,
+            margin_top=region.margin_top,
+            margin_bottom=region.margin_bottom,
+            margin_left=region.margin_left,
+            margin_right=region.margin_right,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -447,6 +488,24 @@ class MainWindow(QMainWindow):
         new_page = max(1, dlg.region_page)
         page_changed = new_page != region.page
         region.page = new_page
+        region.align = dlg.region_align
+        region.indent_em = dlg.region_indent_em
+        region.paragraphs = dlg.region_paragraphs
+        region.word_spacing = dlg.region_word_spacing
+        region.line_spacing = dlg.region_line_spacing
+        region.font_size_sigma = dlg.region_font_size_sigma
+        region.word_spacing_sigma = dlg.region_word_spacing_sigma
+        region.line_spacing_sigma = dlg.region_line_spacing_sigma
+        region.perturb_x_sigma = dlg.region_perturb_x_sigma
+        region.perturb_y_sigma = dlg.region_perturb_y_sigma
+        region.perturb_theta_sigma = dlg.region_perturb_theta_sigma
+        region.miswrite_rate = dlg.region_miswrite_rate
+        region.miswrite_strikeout_style = dlg.region_miswrite_strikeout_style
+        region.color = dlg.region_color
+        region.margin_top = dlg.region_margin_top
+        region.margin_bottom = dlg.region_margin_bottom
+        region.margin_left = dlg.region_margin_left
+        region.margin_right = dlg.region_margin_right
         self._refresh_region_list()
         if page_changed and region.page - 1 != self._preview_index:
             # 页码被改走时结束调整态，避免调整框留在旧页上误导
@@ -542,8 +601,8 @@ class MainWindow(QMainWindow):
         p.miswrite_strikeout_style = ("line", "double_line", "slash", "cross")[
             ui.miswrite_style_combo.currentIndex()
         ]
-        # 框选区域：拷贝快照，避免渲染线程读到后续被编辑的同一对象
-        p.regions = [copy.copy(r) for r in self._regions]
+        # 框选区域：深拷贝快照，避免渲染线程读到后续被编辑的同一对象及其段落列表
+        p.regions = [copy.deepcopy(r) for r in self._regions]
         return p
 
     def _collect_paragraphs(self):
