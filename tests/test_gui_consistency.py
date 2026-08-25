@@ -204,3 +204,48 @@ def test_region_dialog_features(qapp) -> None:
     assert paras[1].text == "段落二"
     assert paras[1].align == "right"
 
+
+def test_downscaled_preview_params_preserves_regions_and_paragraphs(window) -> None:
+    """测试预览参数降采样时，完整保留区域与主文本的段落排版、对齐及覆盖项。"""
+    from handwritesim.core.models import HandwritingParams, Paragraph, TextRegion
+
+    bg_path = window._ui.lineEdit_2.text()
+    p = HandwritingParams(
+        font_path=window._ui.lineEdit.text(),
+        background_path=bg_path,
+        font_size=40,
+        paragraphs=[
+            Paragraph(text="主段落", align="center", first_line_indent=20)
+        ],
+        regions=[
+            TextRegion(
+                x=100, y=100, w=200, h=100,
+                text="你好\n中刺刀",
+                align="left",
+                paragraphs=[
+                    Paragraph(text="你好", align="left"),
+                    Paragraph(text="中刺刀", align="center"),
+                ],
+                color="#123456",
+                margin_left=10,
+                miswrite_strikeout_style="cross",
+            )
+        ]
+    )
+    # 模拟图片宽度很大触发降采样
+    window._preview_max_width = 300
+    preview = window._downsample_preview(p)
+
+    assert preview.paragraphs is not None
+    assert preview.paragraphs[0].align == "center"
+
+    assert preview.regions is not None and len(preview.regions) == 1
+    r = preview.regions[0]
+    assert r.color == "#123456"
+    assert r.miswrite_strikeout_style == "cross"
+    assert r.paragraphs is not None and len(r.paragraphs) == 2
+    assert r.paragraphs[0].align == "left"
+    assert r.paragraphs[1].text == "中刺刀"
+    assert r.paragraphs[1].align == "center"
+
+

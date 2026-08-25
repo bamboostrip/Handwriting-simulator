@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ..core.models import HandwritingParams, TextRegion
+from ..core.models import HandwritingParams, Paragraph, TextRegion
 from ..core import doc_render
 from ..core import presets
 from ..core.paths import assets_root, ensure_assets_dirs
@@ -889,18 +889,59 @@ class MainWindow(QMainWindow):
         for attr in self._SPATIAL_ATTRS:
             setattr(preview, attr, getattr(preview, attr) * scale)
         preview.font_size = max(1.0, preview.font_size)
-        # 框选区域同样按比例缩放到预览坐标（深拷贝，不污染原始快照）
-        preview.regions = [
-            TextRegion(
-                x=round(r.x * scale), y=round(r.y * scale),
-                w=max(1, round(r.w * scale)), h=max(1, round(r.h * scale)),
-                text=r.text, font_path=r.font_path,
-                printed=r.printed,
-                font_size=round(r.font_size * scale) if r.font_size else 0,
-                page=r.page,
+        if params.paragraphs:
+            preview.paragraphs = [
+                Paragraph(
+                    text=p.text,
+                    align=p.align,
+                    first_line_indent=p.first_line_indent * scale,
+                )
+                for p in params.paragraphs
+            ]
+        # 框选区域同样按比例缩放到预览坐标（深拷贝，保留全部排版、对齐、覆盖项与段落）
+        preview.regions = []
+        for r in params.regions or []:
+            scaled_paras = None
+            if r.paragraphs:
+                scaled_paras = [
+                    Paragraph(
+                        text=p.text,
+                        align=p.align,
+                        first_line_indent=p.first_line_indent * scale,
+                    )
+                    for p in r.paragraphs
+                ]
+            preview.regions.append(
+                TextRegion(
+                    x=round(r.x * scale),
+                    y=round(r.y * scale),
+                    w=max(1, round(r.w * scale)),
+                    h=max(1, round(r.h * scale)),
+                    text=r.text,
+                    font_path=r.font_path,
+                    printed=r.printed,
+                    font_size=round(r.font_size * scale) if r.font_size else 0,
+                    page=r.page,
+                    align=r.align,
+                    indent_em=r.indent_em,
+                    paragraphs=scaled_paras,
+                    word_spacing=round(r.word_spacing * scale) if r.word_spacing is not None else None,
+                    line_spacing=round(r.line_spacing * scale) if r.line_spacing is not None else None,
+                    font_size_sigma=round(r.font_size_sigma * scale) if r.font_size_sigma is not None else None,
+                    word_spacing_sigma=round(r.word_spacing_sigma * scale) if r.word_spacing_sigma is not None else None,
+                    line_spacing_sigma=round(r.line_spacing_sigma * scale) if r.line_spacing_sigma is not None else None,
+                    perturb_x_sigma=round(r.perturb_x_sigma * scale) if r.perturb_x_sigma is not None else None,
+                    perturb_y_sigma=round(r.perturb_y_sigma * scale) if r.perturb_y_sigma is not None else None,
+                    perturb_theta_sigma=r.perturb_theta_sigma,
+                    miswrite_rate=r.miswrite_rate,
+                    miswrite_strikeout_style=r.miswrite_strikeout_style,
+                    color=r.color,
+                    margin_top=round(r.margin_top * scale) if r.margin_top is not None else None,
+                    margin_bottom=round(r.margin_bottom * scale) if r.margin_bottom is not None else None,
+                    margin_left=round(r.margin_left * scale) if r.margin_left is not None else None,
+                    margin_right=round(r.margin_right * scale) if r.margin_right is not None else None,
+                )
             )
-            for r in params.regions or []
-        ]
         return preview
 
     # ------------------------------------------------------------------
