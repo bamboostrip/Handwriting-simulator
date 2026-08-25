@@ -93,8 +93,8 @@ def test_region_and_main_text_coexist(tmp_path: Path) -> None:
     assert ink[71:100, 31:140].any()
 
 
-def test_region_multi_page(tmp_path: Path) -> None:
-    """区域文字超出矩形时应流式延续到下一页的同一矩形。"""
+def test_region_overflow_does_not_create_extra_pages(tmp_path: Path) -> None:
+    """区域文字超出矩形时直接截断在所属单页，不应创建额外页面。"""
     params = _params(tmp_path)
     box = (50, 40, 180, 80)
     params.regions = [
@@ -102,12 +102,112 @@ def test_region_multi_page(tmp_path: Path) -> None:
                    text="很长的一段区域文字。" * 30)
     ]
     pages = list(HandwritingEngine(backend="fast").generate(params))
-    assert len(pages) >= 2
-    for page in pages:
-        ink = _ink_mask(page)
-        assert ink.any()
-        inner = ink[box[1]:box[1] + box[3], box[0]:box[0] + box[2]]
-        assert inner.any()
+    assert len(pages) == 1
+    ink = _ink_mask(pages[0])
+    assert ink.any()
+    inner = ink[box[1]:box[1] + box[3], box[0]:box[0] + box[2]]
+    assert inner.any()
+
+
+def test_region_margin_shifts_text(tmp_path: Path) -> None:
+    """设置区域内边距后，墨迹分布应发生偏移。"""
+    p1 = _params(tmp_path)
+    p1.regions = [
+        TextRegion(x=40, y=40, w=300, h=100, text="边距测试文本", margin_left=0)
+    ]
+    img1 = HandwritingEngine(backend="fast", seed=42).render_preview(p1)
+
+    p2 = _params(tmp_path)
+    p2.regions = [
+        TextRegion(x=40, y=40, w=300, h=100, text="边距测试文本", margin_left=50)
+    ]
+    img2 = HandwritingEngine(backend="fast", seed=42).render_preview(p2)
+
+    m1 = _ink_mask(img1)
+    m2 = _ink_mask(img2)
+    assert not np.array_equal(m1, m2), "设置左边距后墨迹分布应发生改变"
+
+
+def test_region_alignment_shifts_ink(tmp_path: Path) -> None:
+    """居中与左对齐的区域墨迹质心应不同。"""
+    def ink_centroid_x(align: str) -> float:
+        params = _params(tmp_path)
+        params.regions = [
+            TextRegion(x=40, y=40, w=300, h=120, text="对齐测试", align=align)
+        ]
+        img = HandwritingEngine(backend="fast", seed=42).render_preview(params)
+        mask = _ink_mask(img)
+        ys, xs = np.nonzero(mask)
+        assert len(xs) > 0
+        return float(xs.mean())
+
+    left_x = ink_centroid_x("left")
+    center_x = ink_centroid_x("center")
+    right_x = ink_centroid_x("right")
+    assert center_x > left_x + 10.0, f"居中质心应偏右: left={left_x}, center={center_x}"
+    assert right_x > center_x + 10.0, f"右对齐质心应更偏右: center={center_x}, right={right_x}"
+
+
+def test_region_multi_paragraph_alignment(tmp_path: Path) -> None:
+    """多段落排版信息应正常在区域内生效渲染。"""
+    from handwritesim.core.models import Paragraph
+
+    params = _params(tmp_path)
+    params.regions = [
+        TextRegion(
+            x=40, y=40, w=300, h=200,
+            text="你好\n张三",
+            paragraphs=[
+                Paragraph(text="你好", align="center", first_line_indent=0),
+                Paragraph(text="张三", align="right", first_line_indent=0),
+            ]
+        )
+    ]
+    img = HandwritingEngine(backend="fast", seed=42).render_preview(params)
+    assert _ink_mask(img).any(), "多段区域应成功渲染"
+
+
+def test_region_overrides_change_output(tmp_path: Path) -> None:
+    """设置覆盖项后渲染结果应不同；打印体下忽略扰动与错字类覆盖。"""
+    base = _params(tmp_path)
+    base.regions = [
+        TextRegion(x=40, y=40, w=300, h=200, text="覆盖测试文字内容", font_size=28)
+    ]
+    base_img = HandwritingEngine(backend="fast", seed=42).render_preview(base)
+
+    overridden = _params(tmp_path)
+    overridden.regions = [
+        TextRegion(
+            x=40, y=40, w=300, h=200, text="覆盖测试文字内容",
+            font_size=28,
+            word_spacing=24,
+            line_spacing=64,
+            perturb_theta_sigma=0.3,
+            miswrite_rate=0.5,
+            color="#c81e1e",
+        )
+    ]
+    over_img = HandwritingEngine(backend="fast", seed=42).render_preview(overridden)
+    assert not np.array_equal(np.asarray(base_img), np.asarray(over_img)), "设置覆盖项后渲染结果应当不同"
+
+    # 打印体忽略扰动类覆盖：带扰动覆盖的打印体 == 不带覆盖的打印体
+    printed_plain = _params(tmp_path)
+    printed_plain.regions = [
+        TextRegion(x=40, y=40, w=300, h=200, text="打印体覆盖", printed=True, font_size=28)
+    ]
+    img_plain = HandwritingEngine(backend="fast", seed=42).render_preview(printed_plain)
+
+    printed_overridden = _params(tmp_path)
+    printed_overridden.regions = [
+        TextRegion(
+            x=40, y=40, w=300, h=200, text="打印体覆盖",
+            printed=True, font_size=28,
+            perturb_theta_sigma=0.5,
+            miswrite_rate=0.9,
+        )
+    ]
+    img_over = HandwritingEngine(backend="fast", seed=42).render_preview(printed_overridden)
+    assert np.array_equal(np.asarray(img_plain), np.asarray(img_over)), "打印体应忽略扰动/错字类覆盖项"
 
 
 def test_region_same_seed_preview_matches_export(tmp_path: Path) -> None:

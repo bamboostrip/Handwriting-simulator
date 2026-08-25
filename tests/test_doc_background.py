@@ -112,10 +112,10 @@ def test_engine_uses_per_page_backgrounds(tmp_path) -> None:
 
 
 def test_engine_single_background_fallback_for_extra_pages(tmp_path) -> None:
-    """区域延续超出文档页数时复用最后一页背景，不崩溃。"""
+    """区域所在页超出文档页数时复用最后一页背景，不崩溃。"""
     params = _bg_params(tmp_path, [(255, 0, 0), (0, 0, 255)])
     params.regions = [
-        TextRegion(x=40, y=40, w=120, h=60, text="很长的一段内容。" * 20, page=2)
+        TextRegion(x=40, y=40, w=120, h=60, text="第三页区域内容", page=3)
     ]
     pages = list(HandwritingEngine(backend="fast").generate(params))
     assert len(pages) >= 3

@@ -655,20 +655,68 @@ class FastEngine:
     def _region_params(
         self, params: HandwritingParams, region: TextRegion
     ) -> HandwritingParams:
-        """构造区域局部的渲染参数：独立字体/字号；打印体关闭全部扰动。"""
+        """构造区域局部的渲染参数：独立字体/字号；排版/扰动/错字/颜色覆盖项；打印体关闭全部扰动。"""
         rp = copy.copy(params)
         rp.text = region.text
         rp.paragraphs = None
         rp.regions = None
-        # 区域以矩形自身为界，不再叠加整页边距
-        rp.left_margin = 0
-        rp.right_margin = 0
-        rp.top_margin = 0
-        rp.bottom_margin = 0
+        # 区域内边距（以矩形自身为界）
+        rp.left_margin = region.margin_left or 0
+        rp.right_margin = region.margin_right or 0
+        rp.top_margin = region.margin_top or 0
+        rp.bottom_margin = region.margin_bottom or 0
         if region.font_path:
             rp.font_path = region.font_path
         if region.font_size > 0:
             rp.font_size = region.font_size
+
+        # 段落 / 对齐 / 首行缩进：
+        if region.paragraphs:
+            rp.paragraphs = [copy.copy(p) for p in region.paragraphs]
+            rp.text = ""
+        elif region.align != "left" or region.indent_em > 0:
+            rp.paragraphs = [
+                Paragraph(
+                    text=region.text,
+                    align=region.align,
+                    first_line_indent=int(round(region.indent_em * rp.font_size)),
+                )
+            ]
+            rp.text = ""
+        elif "\n" in region.text:
+            rp.paragraphs = [
+                Paragraph(text=t, align="left", first_line_indent=0)
+                for t in region.text.split("\n")
+            ]
+            rp.text = ""
+        else:
+            rp.text = region.text
+
+        # 逐区域覆盖项（None = 跟随主设置）
+        if region.word_spacing is not None:
+            rp.word_spacing = region.word_spacing
+        if region.line_spacing is not None:
+            rp.line_spacing = region.line_spacing
+        if region.word_spacing_sigma is not None:
+            rp.word_spacing_sigma = region.word_spacing_sigma
+        if region.line_spacing_sigma is not None:
+            rp.line_spacing_sigma = region.line_spacing_sigma
+        if region.font_size_sigma is not None:
+            rp.font_size_sigma = region.font_size_sigma
+        if region.perturb_x_sigma is not None:
+            rp.perturb_x_sigma = region.perturb_x_sigma
+        if region.perturb_y_sigma is not None:
+            rp.perturb_y_sigma = region.perturb_y_sigma
+        if region.perturb_theta_sigma is not None:
+            rp.perturb_theta_sigma = region.perturb_theta_sigma
+        if region.miswrite_rate is not None:
+            rp.miswrite_rate = region.miswrite_rate
+        if region.miswrite_strikeout_style is not None:
+            rp.miswrite_strikeout_style = region.miswrite_strikeout_style
+        if region.color is not None:
+            rp.color = region.color
+
+        # 打印体：零扰动、零错字（优先于任何覆盖项）
         if region.printed:
             rp.word_spacing_sigma = 0
             rp.line_spacing_sigma = 0
@@ -702,20 +750,23 @@ class FastEngine:
     ) -> Iterator[Image.Image]:
         """框选区域模式：每个区域独立排版，与主文字合成后逐页输出。
 
-        每个区域带起始页（region.page，1 基）：区域自己的第 k 页墨迹
-        合成到全局第 start + k 页（start = page - 1），文字超出矩形时
-        流式延续到后续页的同一矩形。总页数取主文字、各区域所需末页的
-        最大值。区域先合成、主文字后合成（重叠时主文字在上）；
+        每个区域仅在所属页面（target_page = region.page - 1）渲染，
+        超出框选范围的内容单页自然截断（不跨页延伸）。
+        总页数取主文字、各区域所在页的最大值（至少 1 页）。
+        区域先合成、主文字后合成（重叠时主文字在上）；
         随机源消费顺序固定，相同 seed 下预览与导出逐像素一致。
         """
         background = self._first_background(params)
         height, width = background.shape[:2]
         main_masks = self._main_page_masks(params, width, height)
 
-        # (区域局部参数, 偏移x, 偏移y, 区域逐页掩码, 全局起始页索引0基)
-        entries: list[tuple[HandwritingParams, int, int, list[np.ndarray], int]] = []
+        # entries: (局部参数, ox, oy, rw, rh, 单页mask, 目标页索引0基)
+        entries: list[tuple[HandwritingParams, int, int, int, int, np.ndarray, int]] = []
         for index, region in enumerate(params.regions or []):
-            if not region.text.strip():
+            has_text = bool(region.text.strip()) or (
+                bool(region.paragraphs) and any(p.text.strip() for p in region.paragraphs)
+            )
+            if not has_text:
                 continue
             ox = max(0, min(int(region.x), width - 1))
             oy = max(0, min(int(region.y), height - 1))
@@ -725,35 +776,33 @@ class FastEngine:
             # 每区域独立排版随机源：由主 seed 派生的确定性字符串种子，
             # 保证相同 seed 下预览与导出的逐字扰动完全一致
             rand = random.Random(f"{self._seed}|region{index}")
-            masks: list[np.ndarray] = []
-            start = 0
-            while True:
-                prev = start
-                mask, start = _layout_text(
-                    rp, rand, region.text, start, rw, rh, force_first_line=True
+
+            # 区域排版：仅排版在所属单页内（超出直接截断）
+            if rp.paragraphs:
+                masks = list(self._paragraph_page_masks(rp, rw, rh, rand=rand))
+                mask = masks[0] if masks else np.zeros((rh, rw), dtype=bool)
+            else:
+                mask, _ = _layout_text(
+                    rp, rand, region.text, 0, rw, rh, force_first_line=True
                 )
-                masks.append(mask)
-                # 区域矮到一行都放不下时 start 不再推进，直接结束避免死循环
-                if start >= len(region.text) or start == prev:
-                    break
-            entries.append((rp, ox, oy, masks, max(1, int(region.page)) - 1))
+            target_page = max(1, int(region.page)) - 1
+            entries.append((rp, ox, oy, rw, rh, mask, target_page))
 
         n_pages = max(
             [len(main_masks), self._background_count(params)]
-            + [e[4] + len(e[3]) for e in entries]
+            + [e[6] + 1 for e in entries]
             + [1]
         )
         for page_index in range(n_pages):
             canvas = self._page_background(
                 params, page_index, (width, height)
             ).copy()
-            for rp, ox, oy, masks, start_page in entries:
-                local = page_index - start_page
-                if not 0 <= local < len(masks):
+            for rp, ox, oy, rw, rh, mask, target_page in entries:
+                if page_index != target_page or not mask.any():
                     continue
-                ys, xs = _perturbed_positions(masks[local], rp, self._rng)
+                ys, xs = _perturbed_positions(mask, rp, self._rng)
                 canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
-            if page_index < len(main_masks):
+            if page_index < len(main_masks) and main_masks[page_index].any():
                 canvas = _perturb_mask(main_masks[page_index], params, self._rng, canvas)
             yield Image.fromarray(canvas, mode="RGB")
 
@@ -775,7 +824,7 @@ class FastEngine:
             page_index += 1
 
     def _paragraph_page_masks(
-        self, params: HandwritingParams, width: int, height: int
+        self, params: HandwritingParams, width: int, height: int, rand: random.Random | None = None
     ) -> Iterator[np.ndarray]:
         """按段落逐页排版，yield 每页前景掩码（不做笔画扰动）。
 
@@ -783,7 +832,8 @@ class FastEngine:
         每行（含段内换行、段落边界、空行）均推进一个完整行距；
         某行的绘制基线越过页底限制时才换页，保证首页不留空白。
         """
-        rand = self._new_rand()
+        if rand is None:
+            rand = self._new_rand()
         line_spacing = float(params.line_spacing) + float(params.font_size)
         lead = line_spacing - float(params.font_size)
         # 预览降采样会使边距为浮点，这里取整以保证 numpy 索引为整数
