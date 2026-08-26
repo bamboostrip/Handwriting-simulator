@@ -11,9 +11,10 @@
 | | Python 版 | Rust 版 |
 | --- | --- | --- |
 | 渲染引擎 | numpy + scipy（FastEngine） | 纯 Rust：ab_glyph + 自研笔画扰动引擎 |
-| 界面 | PyQt6 | Slint（原生渲染，winit + femtovg，软件渲染兜底） |
+| 界面 | PyQt6 | Tauri 2 + Vue 3（系统 WebView 渲染；Rust 命令层复用核心引擎） |
 | PDF 导出 | ✅（同步对齐） | ✅ **300 DPI 位图层 PDF**（printpdf + lopdf） |
 | 错字率模拟 | ✅（同步对齐） | ✅ **错字率 + 划掉重写**（单线/双线/斜线/叉号四种涂改样式） |
+| 框选文字区域 / 文档底图 | ✅（同步对齐） | ✅（该功能由 Rust 版先行实现，Python 版已对齐） |
 | docx 导入 | python-docx | zip + quick-xml 自研解析（对齐/首行缩进） |
 | 预览降采样 | PIL resize | fast_image_resize（SIMD，32MP 背景毫秒级） |
 
@@ -29,6 +30,8 @@
 | 界面 | PyQt6（纯 Qt 控件 + 自动布局，无背景图片依赖） |
 | 渲染引擎 | numpy + scipy（FastEngine，默认）；handright 8.2.0（可选经典后端） |
 | 图像处理 | Pillow |
+| PDF 导出 | img2pdf（300 DPI 位图层，PNG 无损嵌入） |
+| PDF 栅格化 | pypdfium2（PDF 文档底图逐页渲染） |
 | docx 解析 | python-docx |
 | 测试 | pytest |
 | 打包 | PyInstaller（onefile 单文件，跨 Windows/macOS/Linux，`HandWriteSim.spec`） |
@@ -40,17 +43,22 @@
 - **富文本输入**：多段文本、空行，所见即所得
 - **段落排版工具**：左对齐 / 居中 / 右对齐 / 首行缩进（按 2 倍字体大小），支持整段应用
 - **导入 docx**：自动解析段落对齐方式与首行缩进（支持 Word 的「首行缩进 2 字符」写法，沿样式链继承）
-- **字体 / 背景选择**：字体支持 `.ttf` `.ttc` `.otf`；背景支持 `.png` `.jpg` `.jpeg` `.bmp`
+- **字体 / 背景选择**：字体支持 `.ttf` `.ttc` `.otf`；背景支持 `.png` `.jpg` `.jpeg` `.bmp` `.webp`
 - **文字颜色**：直接输入 `#RRGGBB` 十六进制颜色值
 - **排版参数**：字水平间距、字竖直间距（行距）、字体大小，每个都带独立的随机扰动 σ
 - **笔画扰动**：水平位移、竖直位移、笔画旋转三个独立扰动强度
+- **写错字模拟**：错字率 0~30% 滑杆调节，错字划掉后按「右上方重写」（小一号、同一支笔加粗）或「后文重写」两种方式补写，涂改样式支持单线 / 双线 / 斜线 / 叉号
+- **框选文字区域**：预览图上拖拽画框，文字在框内独立排版渲染，支持手写体 / 打印体混排；区域可指定所在页（如第 2 页框选）、列表悬浮高亮、单击显示可拖动 / 8 向缩放的调整框二次微调、双击重新编辑
+- **区域编辑对话框**：内置富文本段落编辑器（逐段对齐 / 首行缩进、行状态提示、一键导入 docx 段落）；排版与扰动参数可逐区域覆盖（字距 / 行距 / 字号及 σ、笔画扰动、错字率与涂改样式、文字颜色、四向内边距），未设置项跟随主设置，打印体区域强制零扰动零错字；区域内容在所在页内排版，超出框选范围自然截断
+- **导入 PDF / Word 文档底图**：任意 PDF（pypdfium2 栅格化）或 DOCX（Word COM / LibreOffice 转 PDF）逐页渲染为多页背景，直接在「打印稿」上框选手写填写，适合表格、试卷、实验报告等场景
+- **纯背景预览**：无需输入文字，选好背景（图片或导入文档）即可直接预览，方便先摆好版式再逐页框选
 - **边距设置**：上 / 下 / 左 / 右 位置式布局，输入框位置即含义
 - **边界提示（仅预览）**：开关 + 自定义颜色，非渲染区域半透明着色并绘制边距框线，直观看清文字实际渲染边界（默认关闭）
 - **实时自动预览**：停止输入 300ms 后自动渲染，全程后台线程不卡界面；参数不完整时静默跳过
 - **多页预览**：上一页 / 下一页 / 页码指示，自动分页
 - **预览底色切换**：浅灰绿 / 深灰两档，背景图与底色撞色时可切换以区分边界
 - **预设系统**：预设文件夹（`presets/`）内预设可直接下拉切换，也支持保存 / 载入任意位置（JSON 格式，颜色为 `#RRGGBB`），旧版预设自动兼容
-- **一键导出**：全部页面导出为 `0.png`、`1.png`……到 `output/` 目录
+- **一键导出**：全部页面导出为 `0.png`、`1.png`……到 `output/` 目录，或一键导出 **300 DPI 位图层 PDF**（img2pdf，PNG 无损嵌入）
 
 ### CLI（命令行）
 
@@ -60,6 +68,8 @@
 - `--save-preset` 生成后保存参数预设
 - 未指定背景时自动生成纯白背景，可用 `--width` / `--height` 控制尺寸
 - `--preview-only` 仅渲染第一页，快速查看效果
+- `--pdf` 直接导出 300 DPI 位图层 PDF（替代图片导出）
+- `--miswrite-*` 系列参数启用错字模拟（错字率 / 重写方式 / 涂改样式）
 
 ### 渲染引擎
 
@@ -93,6 +103,8 @@ uv sync --extra dev
 | pillow | >=11,<13 | 图像绘制与读写 |
 | PyQt6 | >=6.6 | 图形界面 |
 | python-docx | >=1.2.0 | docx 解析 |
+| img2pdf | >=0.6.3 | PDF 位图层导出 |
+| pypdfium2 | >=4.30 | PDF 文档底图栅格化 |
 | pytest | >=8.0（dev） | 测试 |
 | pyinstaller | >=6.0（dev） | 打包 |
 
@@ -138,7 +150,15 @@ uv run handwrite-cli "你好" --font f.ttf --background bg.png --preview-only
 
 # 生成并保存当前参数为预设
 uv run handwrite-cli "你好" --font f.ttf --background bg.png --save-preset my.preset.json
+
+# 直接导出 PDF（300 DPI 位图层）
+uv run handwrite-cli "你好，世界！" --font f.ttf --background bg.png --pdf output/手写.pdf
+
+# 开启错字模拟：5% 错字率，右上方小字重写，单线涂改
+uv run handwrite-cli "很长很长的正文……" --font f.ttf --background bg.png --miswrite-rate 0.05 --miswrite-mode above --miswrite-style line
 ```
+
+> 框选文字区域与 PDF / Word 文档底图为 GUI 功能（涉及画布交互），CLI 暂不提供。
 
 ## CLI 参数说明
 
@@ -164,6 +184,10 @@ uv run handwrite-cli "你好" --font f.ttf --background bg.png --save-preset my.
 | `--perturb-y-sigma` | int | 2 | 笔画竖直位移扰动 |
 | `--perturb-theta-sigma` | float | 0.05 | 笔画旋转扰动（弧度） |
 | `--red` / `--green` / `--blue` | int | 0 | 文字颜色 RGB（0-255） |
+| `--pdf` | 路径 | `""` | 导出 PDF 到指定文件（替代图片导出，300 DPI） |
+| `--miswrite-rate` | float | 0.0 | 错字率 0~1（默认 0 关闭） |
+| `--miswrite-mode` | enum | `above` | 错字重写方式：`above`（右上方小字重写）/ `rewrite`（后文重写） |
+| `--miswrite-style` | enum | `line` | 涂改样式：`line` / `double_line` / `slash` / `cross` |
 
 ## 预设文件格式
 
@@ -236,17 +260,25 @@ Handwriting-simulator/
 │   │   ├── engine_fast.py       # FastEngine：numpy/scipy 高性能渲染
 │   │   ├── engine_handright.py  # HandrightEngine：handright 经典后端
 │   │   ├── docx_io.py           # docx 解析：段落对齐 + 首行缩进（含样式链继承）
+│   │   ├── doc_render.py        # PDF/DOCX 文档底图栅格化（pypdfium2 / Word COM / LibreOffice）
 │   │   └── presets.py           # 预设读写：JSON v2 + 旧版文本兼容 + 相对路径双向转换
 │   └── gui/                     # 图形界面层
 │       ├── ui.py                # Qt 界面构建（纯控件 + 自动布局）
-│       ├── main_window.py       # 主窗口逻辑：参数映射、事件、预览降采样、预设下拉切换
+│       ├── main_window.py       # 主窗口逻辑：参数映射、事件、预览降采样、框选区域与文档底图管理
+│       ├── region_dialog.py     # 框选区域编辑对话框：段落编辑器 + 逐区域参数覆盖面板
 │       ├── workers.py           # QThread 后台渲染 / 导出，信号回传结果
 │       └── resources.py         # 资源路径解析（开发 / PyInstaller 双环境）
 └── tests/                       # pytest 测试
     ├── test_docx_io.py          # docx 对齐与缩进解析
+    ├── test_doc_background.py   # 文档底图（PDF/DOCX 打印预览）与逐页背景
     ├── test_engine.py           # 引擎接口、校验、参数序列化
     ├── test_engine_fast.py      # FastEngine 渲染与段落路径
-    └── test_presets.py          # 预设读写、hex 颜色、相对路径往返、新旧格式兼容
+    ├── test_gui_consistency.py  # GUI 预览/导出一致性回归
+    ├── test_miswrite.py         # 错字划掉重写（错字率驱动）
+    ├── test_pdf_export.py       # PDF 导出（img2pdf 位图层，300 DPI 页尺寸）
+    ├── test_presets.py          # 预设读写、hex 颜色、相对路径往返、新旧格式兼容
+    ├── test_preview_label.py    # 预览坐标换算（系统 DPI 缩放下框选不错位）
+    └── test_regions.py          # 框选文字区域（手写/打印混排）引擎
 ```
 
 ### 分层约定
@@ -268,6 +300,10 @@ Handwriting-simulator/
 ### 段落渲染路径
 
 `params.paragraphs` 非空时启用：每个段落独立排版（对齐 / 首行缩进），按行提取墨迹后逐行流式拼接跨页；行节奏与纯文本路径完全对齐，空行保留占位。居中按行测量水平置中；右对齐按行逻辑宽度（含尾部空格）平移到右边距。
+
+### 区域渲染路径
+
+`params.regions` 非空时，每个框选区域在其指定页内独立排版：区域文本按 `region.paragraphs`（或区域对齐 / 缩进设置）转为段落流，套用逐区域覆盖参数（未设置项跟随主设置；打印体区域强制零扰动、零错字），墨迹绘制限制在框选矩形内，超出部分自然截断、不跨页延伸。区域随机源独立（`random.Random(f"{seed}|region{i}")`），与主文本互不干扰，同 seed 下预览与导出逐像素一致。
 
 ### 随机性
 
@@ -332,7 +368,7 @@ uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 
 > 也可以直接在 GitHub Actions 中构建：推送 `v*` 标签或手动触发 `Build and Release` workflow（`.github/workflows/build.yml`），会自动在 Windows / Linux / macOS 三平台打包并组装便携 zip（exe + 预设 + 背景 + fonts 目录），打标签时自动发布到 Release。
 
-- 产物：`dist/HandWriteSim`（**单文件**，Windows 约 49 MB，Linux/macOS 体积相近）
+- 产物：`dist/HandWriteSim`（**单文件**，Windows 约 55 MB，Linux/macOS 体积相近）
 - 便携模式：首次运行自动创建 `fonts/`、`backgrounds/`、`presets/` 目录，把资源放进去即可，整个文件夹可随意拷贝
 - 打包配置见 `HandWriteSim.spec`（PyInstaller onefile 模式），已按 `sys.platform` 跨平台适配：
   - imageformats 插件按平台文件名收集（`qjpeg.dll` / `libqjpeg.so` / `libqjpeg.dylib`）
@@ -354,4 +390,10 @@ uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 不会。预设只包含排版参数，载入时保留当前文本输入框内容；仅当旧预设本身携带文本时才会回填。
 
 **自动预览什么时候不触发？**
-字体 / 背景缺失、未输入文本时静默跳过，不弹窗打断输入；输入停止 300ms 后触发。
+字体 / 背景缺失时静默跳过，不弹窗打断输入；未输入文字但背景就绪时会渲染**纯背景预览**（方便先摆版式再框选），输入停止 300ms 后触发。
+
+**导入 Word 文档底图需要什么环境？**
+PDF 底图开箱即用（内置 pypdfium2 栅格化）；DOCX 底图需要本机装有 Microsoft Word（COM 自动化，仅 Windows）或 LibreOffice（`soffice` 命令）其一。手动改选图片背景时，文档底图状态自动失效。
+
+**框选区域里的文字超长会怎样？**
+区域内容只在所在页的框选矩形内排版，超出部分自然截断、不会跨页延伸；区域编辑对话框内有单页截断提示。需要更多内容时可加大框选范围或另开区域。
