@@ -4,6 +4,16 @@
 
 提供 **图形界面（GUI）** 与 **命令行（CLI）** 两种使用方式，核心引擎基于 `numpy` + `scipy` 全向量化重写，预览渲染一页约 0.15 秒，实时交互流畅。
 
+## 界面预览
+
+主界面：输入文本、选择字体 / 背景、调整排版参数，右侧实时预览渲染效果，支持多页翻页与一键导出 PNG / PDF：
+
+![Python 版主界面](docs/images/gui-main.png)
+
+框选文字区域：在预览图上拖拽画框，框内文字独立排版渲染，支持手写体 / 打印体混排与逐区域参数覆盖：
+
+![框选文字区域示例](docs/images/gui-region-select.png)
+
 ## 与 Rust 版的关系
 
 本项目另有 [handwrite-sim](https://github.com/bamboostrip/Handwriting-sim-rs)（Rust 版）——纯 Rust 重写（ab_glyph + 自研笔画扰动引擎），两个版本功能保持同步：
@@ -247,9 +257,11 @@ Handwriting-simulator/
 ├── fonts/                       # 运行时自动创建，用户自备字体（版权字体不入库）
 ├── ui/                          # GUI 资源
 │   └── 3d.ico                   # 窗口图标
-├── docs/superpowers/            # 设计文档（段落化排版功能的设计与实现计划）
-│   ├── plans/
-│   └── specs/
+├── docs/
+│   ├── images/                    # README 界面示例图
+│   └── superpowers/               # 设计文档（段落化排版功能的设计与实现计划）
+│       ├── plans/
+│       └── specs/
 ├── src/handwritesim/            # 包源码（src 布局）
 │   ├── app.py                   # GUI 应用入口（QApplication + MainWindow）
 │   ├── cli.py                   # 命令行入口（argparse）
