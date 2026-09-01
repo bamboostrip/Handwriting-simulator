@@ -166,6 +166,62 @@ QToolTip {
     padding: 4px 8px;
     border-radius: 4px;
 }
+QMenuBar {
+    background: transparent;
+    color: #2b3430;
+    font: 10pt "楷体";
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background: #dcf7e6;
+}
+QMenu {
+    background: #ffffff;
+    color: #2b3430;
+    border: 1px solid #c9d6cd;
+    border-radius: 6px;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 4px 20px 4px 20px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #9ddc80;
+    color: #2b3430;
+}
+QMenu::separator {
+    height: 1px;
+    background: #d3ded6;
+    margin: 4px 6px;
+}
+QTextBrowser {
+    background: #ffffff;
+    border: 1px solid #c9d6cd;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #2b3430;
+}
+QLabel a, QTextBrowser a {
+    color: #2e7d32;
+    text-decoration: underline;
+}
+QProgressBar {
+    background: #e6eee8;
+    border: 1px solid #c9d6cd;
+    border-radius: 4px;
+    text-align: center;
+    color: #2b3430;
+    height: 16px;
+}
+QProgressBar::chunk {
+    background: #9ddc80;
+    border-radius: 3px;
+}
 """
 
 _DARK_QSS = """
@@ -326,6 +382,62 @@ QToolTip {
     border: 1px solid #38453d;
     padding: 4px 8px;
     border-radius: 4px;
+}
+QMenuBar {
+    background: transparent;
+    color: #dce5df;
+    font: 10pt "楷体";
+}
+QMenuBar::item {
+    background: transparent;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+QMenuBar::item:selected {
+    background: #26382c;
+}
+QMenu {
+    background: #232b26;
+    color: #e8f0eb;
+    border: 1px solid #38453d;
+    border-radius: 6px;
+    padding: 4px;
+}
+QMenu::item {
+    padding: 4px 20px 4px 20px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #3d6e35;
+    color: #ffffff;
+}
+QMenu::separator {
+    height: 1px;
+    background: #38453d;
+    margin: 4px 6px;
+}
+QTextBrowser {
+    background: #232b26;
+    border: 1px solid #38453d;
+    border-radius: 4px;
+    padding: 4px 8px;
+    color: #e8f0eb;
+}
+QLabel a, QTextBrowser a {
+    color: #8ed271;
+    text-decoration: underline;
+}
+QProgressBar {
+    background: #1e2621;
+    border: 1px solid #38453d;
+    border-radius: 4px;
+    text-align: center;
+    color: #e8f0eb;
+    height: 16px;
+}
+QProgressBar::chunk {
+    background: #3f7e34;
+    border-radius: 3px;
 }
 """
 
@@ -849,9 +961,16 @@ class Ui_Form(object):
         v.setContentsMargins(2, 2, 6, 2)
         v.setSpacing(8)
 
-        # 待处理文本
+        # 待处理文本 + 关于按钮
+        row_text_title = QtWidgets.QHBoxLayout()
         self.label_text = QtWidgets.QLabel(panel)
-        v.addWidget(self.label_text)
+        row_text_title.addWidget(self.label_text)
+        row_text_title.addStretch(1)
+        self.btn_about = QtWidgets.QPushButton("ℹ️ 关于", panel)
+        self.btn_about.setObjectName("btn_about")
+        self.btn_about.setToolTip("查看软件版本、开源仓库及更新")
+        row_text_title.addWidget(self.btn_about)
+        v.addLayout(row_text_title)
 
         # 排版工具按钮
         row_tools = QtWidgets.QHBoxLayout()

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 from PIL import ImageQt
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -19,11 +20,21 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
+from .. import __version__
 from ..core.models import HandwritingParams, Paragraph, TextRegion
 from ..core import doc_render
 from ..core import presets
 from ..core.paths import assets_root, ensure_assets_dirs
+from ..core.updater import (
+    GITHUB_REPO_URL,
+    RUST_REPO_URL,
+    UpdateInfo,
+    get_skipped_version,
+    is_auto_check_enabled,
+)
+from .about_dialog import AboutDialog, CheckUpdateWorker
 from .region_dialog import RegionDialog
+from .update_dialog import UpdateDialog
 from .workers import RenderWorker
 from .ui import Ui_Form, apply_theme, is_dark_mode
 
@@ -80,11 +91,18 @@ class MainWindow(QMainWindow):
         self._refresh_preset_combo()
         self._update_page_nav()
 
+        # 启动时后台异步检查更新（延迟 1.5 秒，避免阻塞启动）
+        self._update_check_worker: CheckUpdateWorker | None = None
+        if is_auto_check_enabled():
+            QTimer.singleShot(1500, self._check_update_on_startup)
+
     # ------------------------------------------------------------------
     # 初始化
     # ------------------------------------------------------------------
     def _connect_signals(self) -> None:
         ui = self._ui
+        # 关于与更新
+        ui.btn_about.clicked.connect(self._show_about)
         ui.pushButton.clicked.connect(self._choose_font)
         ui.pushButton_2.clicked.connect(self._choose_background)
         ui.pushButton_8.clicked.connect(self._import_document)
@@ -1054,3 +1072,28 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
         if not self._auto:
             QMessageBox.warning(self, "失败", message)
+
+    def _show_about(self) -> None:
+        """显示关于对话框。"""
+        dlg = AboutDialog(self)
+        dlg.exec()
+
+    def _check_update_manually(self) -> None:
+        """手动检查更新。"""
+        self._show_about()
+
+    def _check_update_on_startup(self) -> None:
+        """启动时静默检查更新。"""
+        self._update_check_worker = CheckUpdateWorker(__version__)
+        self._update_check_worker.finished.connect(self._on_startup_update_checked)
+        self._update_check_worker.start()
+
+    def _on_startup_update_checked(self, info: UpdateInfo | None) -> None:
+        if info is None:
+            return
+        from ..core.updater import compare_versions
+
+        if compare_versions(info.version, __version__) > 0:
+            if info.version != get_skipped_version():
+                dlg = UpdateDialog(info, __version__, self)
+                dlg.show()
