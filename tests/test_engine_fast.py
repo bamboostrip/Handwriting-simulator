@@ -316,3 +316,20 @@ def test_different_seed_gives_different_strokes(tmp_path: Path) -> None:
         HandwritingEngine(backend="fast", seed=2).render_preview(params).convert("L")
     )
     assert not np.array_equal(a, b)
+
+
+def test_large_font_size_sigma_does_not_crash(tmp_path: Path) -> None:
+    """font_size_sigma 较大时（高斯扰动 <= 0）字号被下限钳制为 1，不崩溃。"""
+    params = _params(tmp_path, "超大字号扰动测试文本，确保不发生字号为0崩溃。")
+    params.font_size_sigma = 100
+    pages = list(HandwritingEngine(backend="fast", seed=12345).generate(params))
+    assert len(pages) >= 1
+
+    # 段落排版路径
+    params_para = _para_params(tmp_path, [
+        Paragraph("段落超大字号扰动测试", align="center"),
+        Paragraph("正文内容。" * 10),
+    ])
+    params_para.font_size_sigma = 100
+    para_pages = list(HandwritingEngine(backend="fast", seed=12345).generate(params_para))
+    assert len(para_pages) >= 1

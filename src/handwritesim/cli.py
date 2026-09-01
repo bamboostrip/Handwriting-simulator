@@ -28,8 +28,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("text", nargs="?", default="", help="要处理的手写文本")
     parser.add_argument("--docx", default="", help="导入 docx 文件（解析对齐与首行缩进）")
-    parser.add_argument("--font", required=True, help="字体文件路径 (.ttf/.ttc)")
-    parser.add_argument("--background", default="", help="背景图片路径（默认纯白）")
+    parser.add_argument("--font", default=None, help="字体文件路径 (.ttf/.ttc)")
+    parser.add_argument("--background", default=None, help="背景图片路径（未指定且无预设时使用纯白背景）")
     parser.add_argument("--width", type=int, default=800, help="背景为纯白时宽度")
     parser.add_argument("--height", type=int, default=1200, help="背景为纯白时高度")
     parser.add_argument("--out", default="output", help="输出目录")
@@ -39,29 +39,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pdf", default="", help="导出 PDF 到指定文件（替代图片导出）")
 
     # 排版
-    parser.add_argument("--font-size", type=int, default=36)
-    parser.add_argument("--word-spacing", type=int, default=5)
-    parser.add_argument("--line-spacing", type=int, default=48)
-    parser.add_argument("--left-margin", type=int, default=30)
-    parser.add_argument("--right-margin", type=int, default=30)
-    parser.add_argument("--top-margin", type=int, default=30)
-    parser.add_argument("--bottom-margin", type=int, default=30)
+    parser.add_argument("--font-size", type=int, default=None)
+    parser.add_argument("--word-spacing", type=int, default=None)
+    parser.add_argument("--line-spacing", type=int, default=None)
+    parser.add_argument("--left-margin", type=int, default=None)
+    parser.add_argument("--right-margin", type=int, default=None)
+    parser.add_argument("--top-margin", type=int, default=None)
+    parser.add_argument("--bottom-margin", type=int, default=None)
     # 扰动
-    parser.add_argument("--word-spacing-sigma", type=int, default=2)
-    parser.add_argument("--line-spacing-sigma", type=int, default=2)
-    parser.add_argument("--font-size-sigma", type=int, default=2)
-    parser.add_argument("--perturb-x-sigma", type=int, default=2)
-    parser.add_argument("--perturb-y-sigma", type=int, default=2)
-    parser.add_argument("--perturb-theta-sigma", type=float, default=0.05)
+    parser.add_argument("--word-spacing-sigma", type=int, default=None)
+    parser.add_argument("--line-spacing-sigma", type=int, default=None)
+    parser.add_argument("--font-size-sigma", type=int, default=None)
+    parser.add_argument("--perturb-x-sigma", type=int, default=None)
+    parser.add_argument("--perturb-y-sigma", type=int, default=None)
+    parser.add_argument("--perturb-theta-sigma", type=float, default=None)
     # 颜色
-    parser.add_argument("--red", type=int, default=0)
-    parser.add_argument("--green", type=int, default=0)
-    parser.add_argument("--blue", type=int, default=0)
+    parser.add_argument("--red", type=int, default=None)
+    parser.add_argument("--green", type=int, default=None)
+    parser.add_argument("--blue", type=int, default=None)
     # 写错字
-    parser.add_argument("--miswrite-rate", type=float, default=0.0, help="错字率 0~1（默认 0 关闭）")
-    parser.add_argument("--miswrite-mode", default="above", choices=["above", "rewrite"],
+    parser.add_argument("--miswrite-rate", type=float, default=None, help="错字率 0~1（默认 0 关闭）")
+    parser.add_argument("--miswrite-mode", default=None, choices=["above", "rewrite"],
                         help="重写方式：above=右上方小字重写，rewrite=后文正常位置重写")
-    parser.add_argument("--miswrite-style", default="line", choices=["line", "double_line", "slash", "cross"],
+    parser.add_argument("--miswrite-style", default=None, choices=["line", "double_line", "slash", "cross"],
                         help="涂改方式：line/double_line/slash/cross")
     return parser
 
@@ -75,10 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         params = HandwritingParams()
 
-    # 命令行显式覆盖
+    # 命令行显式覆盖（仅当非 None 时覆盖）
     explicit = {
         "font_path": args.font,
-        "text": args.text,
         "font_size": args.font_size,
         "word_spacing": args.word_spacing,
         "line_spacing": args.line_spacing,
@@ -100,7 +99,11 @@ def main(argv: list[str] | None = None) -> int:
         "miswrite_strikeout_style": args.miswrite_style,
     }
     for key, value in explicit.items():
-        setattr(params, key, value)
+        if value is not None:
+            setattr(params, key, value)
+
+    if args.text:
+        params.text = args.text
 
     # 段落化：优先 docx，其次纯文本
     if args.docx:
@@ -108,10 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.text:
         params.paragraphs = None
 
-    # 背景：未指定时生成纯白背景
+    # 背景：显式指定 > 预设已有背景 > 生成纯白背景
     if args.background:
         params.background_path = args.background
-    else:
+    elif not params.background_path:
         bg = Image.new("RGB", (args.width, args.height), "white")
         bg_path = Path(args.out) / "__background__.png"
         bg_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +126,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.docx and not args.text:
         print("错误：未提供文本或 docx（可用位置参数或 --docx）", file=sys.stderr)
+        return 2
+
+    if not params.font_path:
+        print("错误：未指定字体文件（请使用 --font 或在预设中包含 font_path）", file=sys.stderr)
         return 2
 
     engine = HandwritingEngine()

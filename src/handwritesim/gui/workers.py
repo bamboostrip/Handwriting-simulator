@@ -43,7 +43,7 @@ def _bounds_overlay(
 class RenderWorker(QThread):
     """在后台线程执行一次渲染或导出。"""
 
-    preview_ready = pyqtSignal(object)   # list[QPixmap]（预览全部页）
+    preview_ready = pyqtSignal(object)   # list[Image.Image]（预览全部页）
     succeeded = pyqtSignal(list)         # list[Path]（导出）或空（预览）
     failed = pyqtSignal(str)             # 错误信息
 
@@ -72,14 +72,14 @@ class RenderWorker(QThread):
         engine = HandwritingEngine(seed=self._seed)
         try:
             if self._mode == "preview":
-                pixmaps = []
+                images = []
                 for im in engine.generate(self._params):
                     if self._bounds is not None:
                         im = _bounds_overlay(im, self._params, self._bounds)
                     else:
                         im = im.convert("RGBA")
-                    pixmaps.append(ImageQt.toqpixmap(im))
-                self.preview_ready.emit(pixmaps)
+                    images.append(im)
+                self.preview_ready.emit(images)
                 self.succeeded.emit([])
             elif self._mode == "pdf":
                 files = [str(engine.save_pdf(self._params, self._out_pdf))]

@@ -11,6 +11,7 @@ import random
 from pathlib import Path
 
 from PIL import Image
+from PIL import ImageQt
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -24,7 +25,7 @@ from ..core import presets
 from ..core.paths import assets_root, ensure_assets_dirs
 from .region_dialog import RegionDialog
 from .workers import RenderWorker
-from .ui import Ui_Form
+from .ui import Ui_Form, apply_theme, is_dark_mode
 
 
 def _is_under_assets(path: Path) -> bool:
@@ -989,8 +990,11 @@ class MainWindow(QMainWindow):
         self._ui.pushButton_7.setEnabled(not busy)
 
     def _on_preview_ready(self, pages) -> None:
-        # 预览全部页已生成，重置到第一页并刷新
-        self._preview_pages = list(pages)
+        # 预览全部页已生成，在主线程将 PIL.Image 安全转换为 QPixmap
+        self._preview_pages = [
+            ImageQt.toqpixmap(p) if isinstance(p, Image.Image) else p
+            for p in pages
+        ]
         self._preview_index = 0
         self._show_page(0)
 
@@ -1006,16 +1010,17 @@ class MainWindow(QMainWindow):
         self._update_page_nav()
 
     # 预览底色候选：一浅一深差异大，背景图撞色时可切换区分
-    _PREVIEW_BG_COLORS = ("#c8d0ca", "#565b56")
+    _PREVIEW_BG_COLORS = ("#c8d0ca", "#565b56", "#242c27")
 
     def _toggle_preview_bg(self) -> None:
         """循环切换预览区底色，避免背景图与底色撞色时边界不可辨。"""
         idx = (getattr(self, "_preview_bg_idx", 0) + 1) % len(self._PREVIEW_BG_COLORS)
         self._preview_bg_idx = idx
         color = self._PREVIEW_BG_COLORS[idx]
+        border_color = "#303d34" if is_dark_mode() else "#d3ded6"
         self._ui.label_11.setStyleSheet(
             f"PreviewLabel {{ background: {color};"
-            " border: 1px solid #d3ded6; border-radius: 6px; }"
+            f" border: 1px solid {border_color}; border-radius: 6px; }}"
         )
 
     def _prev_page(self) -> None:

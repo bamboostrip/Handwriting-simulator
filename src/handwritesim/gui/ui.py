@@ -11,16 +11,39 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from .resources import resource_path
 
 _LIGHT_QSS = """
-QMainWindow { background: #f4f7f4; }
-QWidget { color: #2b3430; font: 10pt "楷体"; }
-QWidget#central { background: #f4f7f4; }
-QScrollArea { background: transparent; border: none; }
+QMainWindow, QDialog, QMessageBox {
+    background: #f4f7f4;
+}
+QWidget {
+    color: #2b3430;
+    font: 10pt "楷体";
+}
+QWidget#central, QWidget#panel, QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {
+    background: #f4f7f4;
+}
+QScrollArea {
+    border: none;
+}
+QLabel {
+    background: transparent;
+    color: #2b3430;
+}
+QLabel[hint="true"] {
+    color: #6b7a70;
+    font-size: 11px;
+}
+QCheckBox, QRadioButton {
+    background: transparent;
+    color: #2b3430;
+}
 QTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox {
     background: #ffffff;
     border: 1px solid #c9d6cd;
     border-radius: 4px;
     padding: 2px 6px;
+    color: #2b3430;
     selection-background-color: #9ddc80;
+    selection-color: #2b3430;
 }
 QTextEdit:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: #79c267;
@@ -36,37 +59,315 @@ QSpinBox::down-button, QDoubleSpinBox::down-button {
     subcontrol-position: bottom right;
     width: 20px;
 }
+QComboBox {
+    background: #ffffff;
+    border: 1px solid #c9d6cd;
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #2b3430;
+}
+QComboBox:focus {
+    border-color: #79c267;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 20px;
+    border-left: 1px solid #c9d6cd;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #c9d6cd;
+    selection-background-color: #9ddc80;
+    selection-color: #2b3430;
+    color: #2b3430;
+}
+QListWidget {
+    background: #ffffff;
+    border: 1px solid #c9d6cd;
+    border-radius: 4px;
+    color: #2b3430;
+    selection-background-color: #9ddc80;
+    selection-color: #2b3430;
+}
 QPushButton {
     background: #dcf7e6;
     border: 1px solid #b7e4c9;
     border-radius: 4px;
     padding: 4px 12px;
+    color: #2b3430;
 }
 QPushButton:hover { background: #c9f0d8; }
 QPushButton:pressed { background: #b2e5c4; }
+QPushButton:checked {
+    background: #b2e5c4;
+    border-color: #79c267;
+}
 QPushButton[primary="true"] {
     background: #9ddc80;
     border: 1px solid #7fc465;
     font-weight: bold;
+    color: #2b3430;
 }
 QPushButton[primary="true"]:hover { background: #8ed271; }
+QPushButton[collapsible="true"] {
+    text-align: left;
+    font-weight: bold;
+    background: #eef5f0;
+    border: 1px solid #d3ded6;
+}
 QGroupBox {
+    background: #f4f7f4;
     border: 1px solid #d3ded6;
     border-radius: 6px;
     margin-top: 12px;
     padding: 14px 8px 8px 8px;
     font-weight: bold;
+    color: #2b3430;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    background: #f4f7f4;
+    color: #2b3430;
+}
 PreviewLabel {
     background: #c8d0ca;
     border: 1px solid #d3ded6;
     border-radius: 6px;
 }
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #d3ded6;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #9ddc80;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #7fc465;
+    width: 14px;
+    margin-top: -4px;
+    margin-bottom: -4px;
+    border-radius: 7px;
+}
 QScrollBar:vertical { width: 10px; background: transparent; }
 QScrollBar::handle:vertical { background: #c3cec6; border-radius: 5px; min-height: 24px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { height: 10px; background: transparent; }
+QScrollBar::handle:horizontal { background: #c3cec6; border-radius: 5px; min-width: 24px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QToolTip {
+    background: #ffffff;
+    color: #2b3430;
+    border: 1px solid #c9d6cd;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
 """
+
+_DARK_QSS = """
+QMainWindow, QDialog, QMessageBox {
+    background: #181c19;
+}
+QWidget {
+    color: #dce5df;
+    font: 10pt "楷体";
+}
+QWidget#central, QWidget#panel, QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {
+    background: #181c19;
+}
+QScrollArea {
+    border: none;
+}
+QLabel {
+    background: transparent;
+    color: #dce5df;
+}
+QLabel[hint="true"] {
+    color: #8e9e95;
+    font-size: 11px;
+}
+QCheckBox, QRadioButton {
+    background: transparent;
+    color: #dce5df;
+}
+QTextEdit, QLineEdit, QSpinBox, QDoubleSpinBox {
+    background: #232b26;
+    border: 1px solid #38453d;
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #e8f0eb;
+    selection-background-color: #3d6e35;
+    selection-color: #ffffff;
+}
+QTextEdit:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border-color: #5ea84d;
+}
+/* 仅扩大数字框上下按钮的点击热区（宽度 20px），其余外观保持系统默认 */
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+}
+QComboBox {
+    background: #232b26;
+    border: 1px solid #38453d;
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #e8f0eb;
+}
+QComboBox:focus {
+    border-color: #5ea84d;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 20px;
+    border-left: 1px solid #38453d;
+}
+QComboBox QAbstractItemView {
+    background: #232b26;
+    border: 1px solid #38453d;
+    selection-background-color: #3d6e35;
+    selection-color: #ffffff;
+    color: #e8f0eb;
+}
+QListWidget {
+    background: #232b26;
+    border: 1px solid #38453d;
+    border-radius: 4px;
+    color: #e8f0eb;
+    selection-background-color: #3d6e35;
+    selection-color: #ffffff;
+}
+QPushButton {
+    background: #26382c;
+    border: 1px solid #3a5441;
+    border-radius: 4px;
+    padding: 4px 12px;
+    color: #dce5df;
+}
+QPushButton:hover { background: #324739; }
+QPushButton:pressed { background: #1c2b21; }
+QPushButton:checked {
+    background: #36543e;
+    border-color: #5ea84d;
+    color: #ffffff;
+}
+QPushButton[primary="true"] {
+    background: #3f7e34;
+    border: 1px solid #4f9c42;
+    font-weight: bold;
+    color: #ffffff;
+}
+QPushButton[primary="true"]:hover { background: #4a913d; }
+QPushButton[primary="true"]:pressed { background: #33662a; }
+QPushButton[collapsible="true"] {
+    text-align: left;
+    font-weight: bold;
+    background: #202923;
+    border: 1px solid #35443a;
+    color: #8ed271;
+}
+QGroupBox {
+    background: #181c19;
+    border: 1px solid #303d34;
+    border-radius: 6px;
+    margin-top: 12px;
+    padding: 14px 8px 8px 8px;
+    font-weight: bold;
+    color: #dce5df;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    background: #181c19;
+    color: #8ed271;
+}
+PreviewLabel {
+    background: #242c27;
+    border: 1px solid #303d34;
+    border-radius: 6px;
+}
+QSlider::groove:horizontal {
+    height: 6px;
+    background: #303d34;
+    border-radius: 3px;
+}
+QSlider::sub-page:horizontal {
+    background: #468a3b;
+    border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    background: #5ea84d;
+    width: 14px;
+    margin-top: -4px;
+    margin-bottom: -4px;
+    border-radius: 7px;
+}
+QScrollBar:vertical { width: 10px; background: transparent; }
+QScrollBar::handle:vertical { background: #38453d; border-radius: 5px; min-height: 24px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal { height: 10px; background: transparent; }
+QScrollBar::handle:horizontal { background: #38453d; border-radius: 5px; min-width: 24px; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QToolTip {
+    background: #232b26;
+    color: #e8f0eb;
+    border: 1px solid #38453d;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+"""
+
+
+def is_dark_mode() -> bool:
+    """判断当前系统环境是否处于深色模式。"""
+    try:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            scheme = app.styleHints().colorScheme()
+            if scheme == QtCore.Qt.ColorScheme.Dark:
+                return True
+            if scheme == QtCore.Qt.ColorScheme.Light:
+                return False
+            # 回退：检查系统调色板背景亮度
+            window_color = app.palette().color(QtGui.QPalette.ColorRole.Window)
+            return window_color.lightness() < 128
+    except Exception:
+        pass
+    return False
+
+
+def get_theme_qss(dark: bool | None = None) -> str:
+    """获取指定或当前系统模式的主题 QSS。"""
+    if dark is None:
+        dark = is_dark_mode()
+    return _DARK_QSS if dark else _LIGHT_QSS
+
+
+def apply_theme(
+    app_or_widget: QtWidgets.QWidget | QtWidgets.QApplication | None = None,
+    dark: bool | None = None,
+) -> None:
+    """应用深色或浅色主题。"""
+    if dark is None:
+        dark = is_dark_mode()
+    qss = get_theme_qss(dark)
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        app.setStyleSheet(qss)
+    if app_or_widget is not None and app_or_widget is not app:
+        app_or_widget.setStyleSheet(qss)
 
 
 class NoWheelSpinBox(QtWidgets.QSpinBox):
@@ -585,7 +886,7 @@ class Ui_Form(object):
         gr = QtWidgets.QVBoxLayout(self.group_regions)
         self.label_regions_hint = QtWidgets.QLabel(self.group_regions)
         self.label_regions_hint.setWordWrap(True)
-        self.label_regions_hint.setStyleSheet("color: #6b7a70; font-weight: normal;")
+        self.label_regions_hint.setProperty("hint", True)
         gr.addWidget(self.label_regions_hint)
         self.region_list = QtWidgets.QListWidget(self.group_regions)
         self.region_list.setObjectName("region_list")
@@ -825,7 +1126,8 @@ class Ui_Form(object):
         row_btn.addWidget(self.pushButton_7, 1)
         right_col.addLayout(row_btn)
 
-        Form.setStyleSheet(_LIGHT_QSS)
+        if not Form.styleSheet() and (QtWidgets.QApplication.instance() is None or not QtWidgets.QApplication.instance().styleSheet()):
+            apply_theme(Form)
         self.retranslateUi(Form)
         QtCore.QMetaObject.connectSlotsByName(Form)
 

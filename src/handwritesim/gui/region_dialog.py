@@ -98,7 +98,7 @@ class RegionDialog(QtWidgets.QDialog):
 
         # 当前行状态提示
         self.label_row_status = QtWidgets.QLabel(scroll_content)
-        self.label_row_status.setStyleSheet("color: #6b7a70; font-size: 11px;")
+        self.label_row_status.setProperty("hint", True)
         v.addWidget(self.label_row_status)
 
         # 富文本段落编辑器
@@ -148,7 +148,7 @@ class RegionDialog(QtWidgets.QDialog):
         self.spin_page.setToolTip("该文字区域在第几页渲染（超出框选范围的内容将自然截断）")
         row_page.addWidget(self.spin_page)
         lbl_page_hint = QtWidgets.QLabel("仅在指定页渲染，超出框选范围的内容自然截断", scroll_content)
-        lbl_page_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
+        lbl_page_hint.setProperty("hint", True)
         lbl_page_hint.setWordWrap(True)
         row_page.addWidget(lbl_page_hint, 1)
         grid_basic.addLayout(row_page, 1, 1)
@@ -175,7 +175,7 @@ class RegionDialog(QtWidgets.QDialog):
         self.spin_size.setToolTip("0 表示使用主界面的字体大小")
         row_size.addWidget(self.spin_size)
         lbl_size_hint = QtWidgets.QLabel(f"主字号当前为 {main_font_size}，0 表示跟随", scroll_content)
-        lbl_size_hint.setStyleSheet("color: #6b7a70; font-size: 11px;")
+        lbl_size_hint.setProperty("hint", True)
         lbl_size_hint.setWordWrap(True)
         row_size.addWidget(lbl_size_hint, 1)
         grid_basic.addLayout(row_size, 3, 1)
@@ -186,9 +186,7 @@ class RegionDialog(QtWidgets.QDialog):
         # 折叠面板：排版与扰动覆盖
         # --------------------------------------------------------------
         self.btn_toggle_adv = QtWidgets.QPushButton(scroll_content)
-        self.btn_toggle_adv.setStyleSheet(
-            "text-align: left; font-weight: bold; background: #eef5f0; border: 1px solid #d3ded6;"
-        )
+        self.btn_toggle_adv.setProperty("collapsible", True)
         v.addWidget(self.btn_toggle_adv)
 
         self.widget_adv = QtWidgets.QWidget(scroll_content)
@@ -197,7 +195,7 @@ class RegionDialog(QtWidgets.QDialog):
         v_adv.setSpacing(6)
 
         lbl_adv_tip = QtWidgets.QLabel("留空即跟随全局设置；打印体下扰动 / 错字类覆盖不生效。", self.widget_adv)
-        lbl_adv_tip.setStyleSheet("color: #6b7a70; font-size: 11px;")
+        lbl_adv_tip.setProperty("hint", True)
         v_adv.addWidget(lbl_adv_tip)
 
         # 1. 排版参数 Group

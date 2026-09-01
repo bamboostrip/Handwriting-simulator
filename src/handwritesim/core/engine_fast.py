@@ -308,7 +308,7 @@ def _layout_text(
             font = base_font
             size = font_size_int
             if params.font_size_sigma:
-                size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
+                size = max(round(rand.gauss(font_size, params.font_size_sigma)), 1)
                 if size != font_size:
                     font = resolve_font(size)
             word_noise = rand.gauss(0, params.word_spacing_sigma)
@@ -419,7 +419,7 @@ def _layout_paragraph(
             yj = round(rand.gauss(y, params.line_spacing_sigma))
             size = font_size_int
             if params.font_size_sigma:
-                size = max(round(rand.gauss(font_size, params.font_size_sigma)), 0)
+                size = max(round(rand.gauss(font_size, params.font_size_sigma)), 1)
                 if size != font_size:
                     resolve_font(size)
             word_noise = rand.gauss(0, params.word_spacing_sigma)
