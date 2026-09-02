@@ -163,28 +163,36 @@ def _run_color(run) -> str | None:
 def _run_font_family(run, para=None) -> str | None:
     """读取 run 的字体 w:rFonts（优先 eastAsia > ascii > hAnsi），返回家族名或 None。
 
-    若 run 无直接指定，沿段落样式链回退（Normal 样式等），以便提取到 Word 默认中文字体。
+    若 run 无直接指定，沿段落样式链回退；兼容同一 rPr 内多个 w:rFonts（Word 主题 + 自定义）。
     """
-    rPr = run._element.rPr
-    if rPr is not None:
-        el = rPr.find(qn("w:rFonts"))
-        if el is not None:
+    def _from_rpr(rPr) -> str | None:
+        if rPr is None:
+            return None
+        # 可能存在多个 w:rFonts（主题 + 覆盖），取最后一个有效
+        found = None
+        for el in rPr.findall(qn("w:rFonts")):
             for attr in ("w:eastAsia", "w:ascii", "w:hAnsi", "w:cs"):
                 val = el.get(qn(attr))
-                if val and val.strip():
-                    return val.strip()
-    # 回退：段落样式
+                if val and val.strip() and val.strip().lower() not in ("theme",):
+                    # 过滤主题占位，优先 eastAsia
+                    if attr == "w:eastAsia":
+                        return val.strip()
+                    if found is None:
+                        found = val.strip()
+        return found
+
+    rPr = run._element.rPr
+    fam = _from_rpr(rPr)
+    if fam:
+        return fam
     if para is not None:
         style = para.style
         while style is not None:
             sp = style.element.find(qn("w:rPr"))
-            if sp is not None:
-                el = sp.find(qn("w:rFonts"))
-                if el is not None:
-                    for attr in ("w:eastAsia", "w:ascii", "w:hAnsi", "w:cs"):
-                        val = el.get(qn(attr))
-                        if val and val.strip():
-                            return val.strip()
+            fam = _from_rpr(sp)
+            if fam:
+                return fam
+            # 段落样式的 rPr 可能在 w:pPr/w:rPr 层？已覆盖 w:style/w:rPr
             style = style.base_style
     return None
 
@@ -242,28 +250,32 @@ def _run_font_size_pt(run, para=None, doc=None) -> float | None:
     rPr = run._element.rPr
     if rPr is not None:
         for tag in ("w:sz", "w:szCs"):
-            el = rPr.find(qn(tag))
-            if el is not None:
+            last = None
+            for el in rPr.findall(qn(tag)):
                 val = el.get(qn("w:val"))
                 if val and val.strip().isdigit():
                     try:
-                        return int(val.strip()) / 2.0
+                        last = int(val.strip()) / 2.0
                     except ValueError:
                         continue
+            if last is not None:
+                return last
     if para is not None:
         style = para.style
         while style is not None:
             sp = style.element.find(qn("w:rPr"))
             if sp is not None:
                 for tag in ("w:sz", "w:szCs"):
-                    el = sp.find(qn(tag))
-                    if el is not None:
+                    last = None
+                    for el in sp.findall(qn(tag)):
                         val = el.get(qn("w:val"))
                         if val and val.strip().isdigit():
                             try:
-                                return int(val.strip()) / 2.0
+                                last = int(val.strip()) / 2.0
                             except ValueError:
                                 continue
+                    if last is not None:
+                        return last
             style = style.base_style
         # 尝试 Normal 样式字体大小
         try:

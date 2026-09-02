@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
     """手写模拟器主窗口。"""
 
     # 预设下拉框占位项：选中时不触发加载
-    _PRESET_PLACEHOLDER = "— 选择预设 —"
+    _PRESET_PLACEHOLDER = "选择预设"
 
     def __init__(self, out_dir: str | Path = "output") -> None:
         super().__init__()

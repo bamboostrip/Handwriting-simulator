@@ -594,16 +594,14 @@ def _layout_paragraph_mixed(
     offset_cache: dict[tuple[str, int, str], int] = {}  # (font_path, size, ch) -> advance
     # 为便于后续测量，预构建 run_infos
     # 每个 run 的基础字号（未扰动）
-    run_bases: list[tuple[str, str, int, str, bool, HandwritingRole | None, bool]] = []  # (text, font_path, base_size, color_hex, printed, role, bold)
-    distinct_colors: set[str] = set()
+    # 每个 Run 的合并键：role_id + 颜色 + 字体区分（用于分层扰动，避免打印/手写同色被合并）
+    run_bases: list[tuple[str, str, int, str, bool, HandwritingRole | None, bool, int]] = []  # (text, font_path, base_size, color_hex, printed, role, bold, role_id)
+    distinct_keys: set[tuple[int, str]] = set()  # (role_id, color)
     for run in runs:
         role = role_map.get(run.role_id)
         is_printed = (role.printed if role else False)
-        # 手写体：固定用用户选择的手写字体（忽略 docx 原字体/加粗）
-        # 打印体：优先沿用 docx 提取的系统字体/字号/加粗，若缺失则回落角色/全局字体
         is_bold = bool(getattr(run, "bold", False)) and is_printed
         if is_printed and (run.font_family or run.font_file or run.font_size or is_bold):
-            # 字体文件优先
             if run.font_file and Path(run.font_file).is_file():
                 fp = run.font_file
             elif run.font_family:
@@ -626,8 +624,8 @@ def _layout_paragraph_mixed(
             base_sz = (role.font_size if (role and role.font_size > 0) else int(params.font_size))
         col = _color_hex_for_run(params, run, role)
         printed = is_printed
-        distinct_colors.add(col.lower())
-        run_bases.append((run.text, fp, base_sz, col.lower(), printed, role, is_bold))
+        distinct_keys.add((run.role_id, col.lower()))
+        run_bases.append((run.text, fp, base_sz, col.lower(), printed, role, is_bold, run.role_id))
 
     line_spacing = float(params.line_spacing) + float(params.font_size)
     end_chars = params.end_chars
@@ -638,7 +636,7 @@ def _layout_paragraph_mixed(
     # 扁平字符流：记录每个字符归属的 run_idx，便于按 run 取字体/颜色
     # 结构: (ch, run_idx)
     flat: list[tuple[str, int]] = []
-    for idx, (text, _, _, _, _, _, _) in enumerate(run_bases):
+    for idx, (text, _, _, _, _, _, _, _) in enumerate(run_bases):
         for ch in text:
             flat.append((ch, idx))
     n = len(flat)
@@ -648,7 +646,7 @@ def _layout_paragraph_mixed(
     strikeout_style = params.miswrite_strikeout_style
 
     def char_font_and_size(run_idx: int, size: int) -> ImageFont.FreeTypeFont:
-        _, fp, _, _, _, _, _ = run_bases[run_idx]
+        _, fp, _, _, _, _, _, _ = run_bases[run_idx]
         # 直接使用 run_bases 解析好的 fp（含打印体原文系统字体），避免再次回落到角色字体
         key = (fp, size)
         cached = font_cache_keyed.get(key)
@@ -666,7 +664,7 @@ def _layout_paragraph_mixed(
         return font
 
     def char_offset_for(run_idx: int, size: int, ch: str) -> int:
-        _, fp, _, _, _, _, _ = run_bases[run_idx]
+        _, fp, _, _, _, _, _, _ = run_bases[run_idx]
         key = (fp, size, ch)
         cached = offset_cache.get(key)
         if cached is not None:
@@ -701,7 +699,7 @@ def _layout_paragraph_mixed(
         # 内层：行内字符
         while pos < n:
             ch, run_idx = flat[pos]
-            _, fp, base_sz, col, _, _, is_bold = run_bases[run_idx]
+            _, fp, base_sz, col, _, _, is_bold, _ = run_bases[run_idx]
             if ch == "\n":
                 pos += 1
                 break
@@ -778,22 +776,24 @@ def _layout_paragraph_mixed(
             for li in range(len(line_ys))
         ]
 
-    # 阶段二：按颜色分层绘制
+    # 阶段二：按 (角色,颜色) 分层绘制（避免打印/手写同色被合并导致扰动错误）
     canvas_h = max(int(y + float(params.font_size) + 4 * float(params.line_spacing_sigma) + 4), 1)
-    # 颜色 -> PIL 1-bit 画布
-    color_to_image: dict[str, Image.Image] = {}
-    color_to_draw: dict[str, ImageDraw.ImageDraw] = {}
-    for col in distinct_colors:
+    # (role_id, color) -> PIL 1-bit 画布
+    key_to_image: dict[tuple[int, str], Image.Image] = {}
+    key_to_draw: dict[tuple[int, str], ImageDraw.ImageDraw] = {}
+    for rid, col in distinct_keys:
+        key = (rid, col)
         img = Image.new("1", (width, canvas_h), 0)
-        color_to_image[col] = img
-        color_to_draw[col] = ImageDraw.Draw(img)
-    # 额外颜色可能在绘制时动态出现（如标签新色），兜底
+        key_to_image[key] = img
+        key_to_draw[key] = ImageDraw.Draw(img)
+    # 额外颜色/角色可能在绘制时动态出现（如标签新色），兜底
     for wrong_ch, correct_ch, cx, cy, size, li, miswrite, angle, local_seed, rewrite_x, run_idx, col, is_bold in chars:
-        # 动态颜色兜底：若该颜色未预建，创建画布
-        if col not in color_to_image:
+        rid = run_bases[run_idx][7]
+        key = (rid, col)
+        if key not in key_to_image:
             img = Image.new("1", (width, canvas_h), 0)
-            color_to_image[col] = img
-            color_to_draw[col] = ImageDraw.Draw(img)
+            key_to_image[key] = img
+            key_to_draw[key] = ImageDraw.Draw(img)
         font = char_font_and_size(run_idx, size)
         shift = 0.0
         if shifts is not None:
@@ -801,13 +801,12 @@ def _layout_paragraph_mixed(
         elif center_shifts is not None:
             shift = center_shifts[li]
         dx = cx + shift
-        draw = color_to_draw[col]
+        draw = key_to_draw[key]
         # 加粗：打印体 bold 用描边模拟（兼容 1-bit 模式）
         if is_bold:
             try:
                 draw.text((round(dx), cy), wrong_ch, fill=1, font=font, stroke_width=1, stroke_fill=1)
             except TypeError:
-                # Pillow 旧版或 1 模式不支持 stroke，回退为雙描
                 draw.text((round(dx), cy), wrong_ch, fill=1, font=font)
                 draw.text((round(dx)+1, cy), wrong_ch, fill=1, font=font)
         else:
@@ -815,13 +814,12 @@ def _layout_paragraph_mixed(
         if miswrite:
             local = random.Random(local_seed)
             wrong_advance = char_offset_for(run_idx, size, wrong_ch) + (1 if is_bold else 0)
-            # 错字删除线绘制在同一颜色层；需要字体与缓存的 font
             def resolve_for_mis(s: int):
                 return char_font_and_size(run_idx, s)
             _draw_miswrite(
                 draw, local, dx, cy, size, wrong_advance, angle,
                 strikeout_style, font, correct_ch, mode == "above",
-                resolve_for_mis, {},  # offset cache alternative not needed
+                resolve_for_mis, {},
             )
             if mode == "rewrite":
                 if is_bold:
@@ -834,17 +832,17 @@ def _layout_paragraph_mixed(
                     draw.text((round(rewrite_x + shift), cy), correct_ch, fill=1, font=font)
 
     # 转为 numpy 并求并集用于行带切分
-    color_to_mask: dict[str, np.ndarray] = {c: np.asarray(img, dtype=bool) for c, img in color_to_image.items()}
+    key_to_mask: dict[tuple[int, str], np.ndarray] = {k: np.asarray(img, dtype=bool) for k, img in key_to_image.items()}
     # union
-    if color_to_mask:
+    if key_to_mask:
         union = np.zeros((canvas_h, width), dtype=bool)
-        for m in color_to_mask.values():
+        for m in key_to_mask.values():
             union |= m
     else:
         union = np.zeros((canvas_h, width), dtype=bool)
     rows = np.any(union, axis=1)
     bands = _split_text_rows(rows)
-    lines: list[tuple[dict[str, np.ndarray] | None, float]] = []
+    lines: list[tuple[dict[tuple[int, str], np.ndarray] | None, float]] = []
     bi = 0
     off_min = -0.85 * float(params.font_size) - 0.25 * line_spacing
     off_max = 0.8 * line_spacing
@@ -857,12 +855,12 @@ def _layout_paragraph_mixed(
                 e = bands[bi][1]
                 bi += 1
             off = min(max(float(s) - yk, off_min), off_max)
-            # 为该行提取各颜色切片
-            band_dict: dict[str, np.ndarray] = {}
-            for col, full in color_to_mask.items():
+            # 为该行提取各 (角色,颜色) 切片
+            band_dict: dict[tuple[int, str], np.ndarray] = {}
+            for key, full in key_to_mask.items():
                 sl = full[s:e]
                 if sl.any():
-                    band_dict[col] = sl.copy()
+                    band_dict[key] = sl.copy()
             lines.append((band_dict if band_dict else None, off))
         else:
             lines.append((None, 0.0))
@@ -997,25 +995,33 @@ def _perturb_mask(
 
 
 def _perturb_mask_colored(
-    colored_masks: dict[str, np.ndarray],
+    colored_masks: dict[str, np.ndarray] | dict[tuple[int, str], np.ndarray],
     params: HandwritingParams,
     rng: np.random.Generator,
     background: np.ndarray,
 ) -> np.ndarray:
-    """多色版本：colored_masks key=#RRGGBB, value=bool mask；按角色 sigma 分别扰动后着色。
+    """多色版本：colored_masks key=#RRGGBB 或 (role_id, #RRGGBB)，按角色 sigma 分别扰动后着色。
 
-    同色多笔画共享同一 sigma（取首个匹配角色或全局）。
+    键为 (role_id, color) 时可精确区分打印/手写同色（如同为 #000000 但打印零扰动）。
+    键为旧版 str 时回退按颜色匹配角色。
     """
     canvas = background.copy()
+    # 兼容旧版 str 键与新版 tuple 键
     role_by_color: dict[str, HandwritingRole | None] = {}
     for role in params.effective_roles():
         if role.color:
             role_by_color[role.color.lower()] = role
-    for col_hex, mask in colored_masks.items():
+    role_by_id: dict[int, HandwritingRole] = {r.id: r for r in params.effective_roles()}
+    for key, mask in colored_masks.items():
         if not mask.any():
             continue
-        key = col_hex.lower()
-        role = role_by_color.get(key)
+        if isinstance(key, tuple):
+            rid, col_hex = key
+            role = role_by_id.get(rid)
+            # 颜色以 key 中的 color 为准（run 的实际颜色）
+        else:
+            col_hex = key  # type: ignore
+            role = role_by_color.get(col_hex.lower())
         if role and role.printed:
             px, py, pt = 0, 0, 0.0
         elif role:
@@ -1377,8 +1383,8 @@ class FastEngine:
 
     def _paragraph_page_masks_mixed(
         self, params: HandwritingParams, width: int, height: int, rand: random.Random | None = None
-    ) -> Iterator[dict[str, np.ndarray]]:
-        """混排版逐页掩码：yield 每页 dict[color_hex -> bool mask]。"""
+    ) -> Iterator[dict[tuple[int, str], np.ndarray]]:
+        """混排版逐页掩码：yield 每页 dict[(role_id, color_hex) -> bool mask]。"""
         if rand is None:
             rand = self._new_rand()
         line_spacing = float(params.line_spacing) + float(params.font_size)
@@ -1386,60 +1392,59 @@ class FastEngine:
         top, bottom = int(params.top_margin), int(params.bottom_margin)
         limit = height - bottom - float(params.font_size)
 
-        all_lines: list[tuple[dict[str, np.ndarray] | None, float]] = []
+        all_lines: list[tuple[dict[tuple[int, str], np.ndarray] | None, float]] = []
         for para in params.paragraphs or []:
             lines = _layout_paragraph(params, rand, para, width)  # type: ignore
-            # 统一为 mixed 形式：plain 行转 dict
-            converted: list[tuple[dict[str, np.ndarray] | None, float]] = []
+            # 统一为 mixed 形式：plain 行转 dict[(role_id,color)]
+            converted: list[tuple[dict[tuple[int, str], np.ndarray] | None, float]] = []
             for band, off in lines:  # type: ignore
                 if band is None:
                     converted.append((None, off))
                 elif isinstance(band, dict):
-                    converted.append((band, off))
+                    # 兼容旧版 str 键与新版 tuple 键
+                    if band and isinstance(next(iter(band.keys())), str):
+                        # 旧版 str -> 转为 (0, color) 的默认角色
+                        converted.append(({ (0, k): v for k, v in band.items()}, off))  # type: ignore
+                    else:
+                        converted.append((band, off))  # type: ignore
                 else:
-                    # bool mask -> dict以默认色
+                    # bool mask -> dict以默认角色+颜色
                     if band.any():
-                        converted.append(({params.color.lower(): band}, off))
+                        converted.append(({(0, params.color.lower()): band}, off))
                     else:
                         converted.append((None, off))
             if not converted:
                 converted = [(None, 0.0)]
             all_lines.extend(converted)
 
-        # 初始化空页字典（按需创建颜色键）
-        # 为复用，先收集所有出现的颜色
-        all_colors: set[str] = set()
+        # 初始化空页字典（按需创建 (role,color) 键）
+        all_keys: set[tuple[int, str]] = set()
         for d, _ in all_lines:
             if d:
-                all_colors.update(d.keys())
-        # 若无颜色，使用默认
-        if not all_colors:
-            all_colors.add(params.color.lower())
+                all_keys.update(d.keys())
+        if not all_keys:
+            all_keys.add((0, params.color.lower()))
 
-        page_dict: dict[str, np.ndarray] = {c: np.zeros((height, width), dtype=bool) for c in all_colors}
-        # 若中途出现新颜色，动态增键
+        page_dict: dict[tuple[int, str], np.ndarray] = {k: np.zeros((height, width), dtype=bool) for k in all_keys}
         yielded = False
         draw_y = float(top) + lead
         for band_dict, off in all_lines:
             if draw_y > limit and any(v.any() for v in page_dict.values()):
                 yield page_dict
                 yielded = True
-                page_dict = {c: np.zeros((height, width), dtype=bool) for c in all_colors}
+                page_dict = {k: np.zeros((height, width), dtype=bool) for k in all_keys}
                 draw_y = float(top) + lead
             if band_dict is not None:
-                # 若该行引入新颜色，扩展页字典
-                for col in list(band_dict.keys()):
-                    if col not in page_dict:
-                        page_dict[col] = np.zeros((height, width), dtype=bool)
-                        all_colors.add(col)
-                    # 同时确保其他页已有颜色同步（后续页也会有）
+                for key in list(band_dict.keys()):
+                    if key not in page_dict:
+                        page_dict[key] = np.zeros((height, width), dtype=bool)
+                        all_keys.add(key)
                 row0 = int(round(draw_y + off))
-                for col, band in band_dict.items():
+                for key, band in band_dict.items():
                     ys, xs = np.nonzero(band)
                     rows = row0 + ys
                     valid = (rows >= 0) & (rows < height)
-                    # 额外过滤 xs 范围（宽度一致，此处无需）
-                    page_dict[col][rows[valid], xs[valid]] = True
+                    page_dict[key][rows[valid], xs[valid]] = True
             draw_y += line_spacing
         if any(v.any() for v in page_dict.values()) or not yielded:
             yield page_dict
