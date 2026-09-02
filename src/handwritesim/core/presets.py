@@ -50,9 +50,10 @@ def save_json(params: HandwritingParams, path: str | Path) -> None:
     """将参数保存为结构化 JSON 预设文件。
 
     仅保存排版参数（不含文本内容），颜色以 #RRGGBB 十六进制保存。
+    version 3 新增 roles。
     """
     data: dict[str, Any] = {
-        "version": 2,
+        "version": 3 if params.roles is not None else 2,
         "params": params.to_preset_dict(),
     }
     with open(path, "w", encoding="utf-8") as fh:
@@ -85,6 +86,9 @@ def load(path: str | Path) -> HandwritingParams:
         params = load_legacy(path)
     params.font_path = from_portable_path(params.font_path)
     params.background_path = from_portable_path(params.background_path)
+    if params.roles:
+        for role in params.roles:
+            role.font_path = from_portable_path(role.font_path)
     return params
 
 
@@ -98,6 +102,11 @@ def save(path: str | Path, params: HandwritingParams) -> None:
     portable = copy.copy(params)
     portable.font_path = to_portable_path(portable.font_path)
     portable.background_path = to_portable_path(portable.background_path)
+    if portable.roles is not None:
+        # 角色字体也做便携化，深拷贝角色列表
+        portable.roles = [copy.copy(r) for r in portable.roles]
+        for r in portable.roles:
+            r.font_path = to_portable_path(r.font_path)
     if path.suffix.lower() in (".txt", ".preset"):
         data = portable.to_lines()
         with open(path, "w", encoding="utf-8") as fh:

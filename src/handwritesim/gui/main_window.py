@@ -21,9 +21,11 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core.models import HandwritingParams, Paragraph, TextRegion
+from ..core.models import HandwritingParams, Paragraph, TextRegion, TextRun, HandwritingRole, default_roles
 from ..core import doc_render
 from ..core import presets
+from ..core.docx_io import load_paragraphs_with_runs, extract_roles_from_paragraphs
+from .role_manager import RoleManagerDialog, role_background
 from ..core.paths import assets_root, ensure_assets_dirs
 from ..core.updater import (
     GITHUB_REPO_URL,
@@ -72,6 +74,8 @@ class MainWindow(QMainWindow):
         # 框选文字区域（原始背景像素坐标）与最近一次预览的降采样比例
         self._regions: list[TextRegion] = []
         self._preview_scale = 1.0
+        # 多角色笔迹槽位（动态高亮映射）
+        self._roles: list[HandwritingRole] = default_roles()
         # 当前正在预览图上拖动/缩放调整的区域行号（None = 非调整态）
         self._editing_row: int | None = None
         # 文档底图：导入的 PDF/DOCX 打印预览逐页 PNG（None = 未使用）
@@ -141,11 +145,146 @@ class MainWindow(QMainWindow):
         # 写错字：滑块数值同步到百分比标签
         ui.miswrite_rate_slider.valueChanged.connect(self._update_miswrite_rate_label)
         self._update_miswrite_rate_label(ui.miswrite_rate_slider.value())
+        # 角色管理
+        ui.btn_role_add.clicked.connect(self._role_add)
+        ui.btn_role_edit.clicked.connect(self._role_edit)
+        ui.btn_role_del.clicked.connect(self._role_del)
+        ui.btn_role_manage.clicked.connect(self._role_manage)
+        ui.role_list.itemDoubleClicked.connect(lambda _: self._role_edit())
+        self._refresh_role_list()
+        # 划选标记：选中文本一键设为打印/角色
+        ui.btn_mark_print.clicked.connect(lambda: self._mark_selection(1))
+        ui.btn_mark_role1.clicked.connect(lambda: self._mark_selection(2))
+        ui.btn_mark_role2.clicked.connect(lambda: self._mark_selection(3))
+        ui.btn_mark_clear.clicked.connect(lambda: self._mark_selection(0))
+        ui.textEdit.selectionChanged.connect(self._update_mark_buttons)
+        self._update_mark_buttons()
         self._connect_auto_preview()
 
     def _update_miswrite_rate_label(self, value: int) -> None:
         """滑块值（0~300）同步为百分比显示（0.0%~30.0%）。"""
         self._ui.label_miswrite_rate_value.setText(f"{value / 10.0:.1f}%")
+
+    # ------------------------------------------------------------------
+    # 角色管理
+    # ------------------------------------------------------------------
+    def _refresh_role_list(self) -> None:
+        from PyQt6.QtGui import QColor
+        lst = self._ui.role_list
+        lst.blockSignals(True)
+        lst.clear()
+        for r in sorted(self._roles, key=lambda x: x.id):
+            bg = role_background(r.id)
+            tag = " 🔒" if r.id in (0, 1) else ""
+            col = r.color or "跟随"
+            font_name = Path(r.font_path).name if r.font_path else "跟随主字体"
+            item = QtWidgets.QListWidgetItem(f"[{r.id}] {r.name}{' (打印)' if r.printed else ''}{tag}  {col}  {font_name}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, r.id)
+            item.setBackground(QColor(bg))
+            # 根据角色背景设置 tooltip 说明动态映射
+            if r.id >= 2:
+                item.setToolTip(f"对应 Word 中第 {r.id-1} 个出现的背景高亮（动态映射），及编辑器中{bg}底色文字")
+            lst.addItem(item)
+        lst.blockSignals(False)
+        # 更新标记按钮文本以反映当前角色名；默认无手写角色时按钮隐藏，导入后按需显示
+        for rid, btn in [(2, self._ui.btn_mark_role1), (3, self._ui.btn_mark_role2)]:
+            role = next((x for x in self._roles if x.id == rid), None)
+            if role:
+                btn.setText(f"{role.name[:6]}")
+                btn.setToolTip(f"设为 {role.name}（{role_background(rid)}底）")
+                btn.setVisible(True)
+            else:
+                btn.setVisible(False)
+
+    def _role_add(self) -> None:
+        nxt = max((r.id for r in self._roles), default=-1) + 1
+        from .role_manager import RoleEditDialog
+        dlg = RoleEditDialog(self, HandwritingRole(id=nxt, name=f"手写角色{nxt-1}"))
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._roles.append(dlg.result_role)
+            self._refresh_role_list()
+            self._preview_timer.start()
+
+    def _role_edit(self) -> None:
+        row = self._ui.role_list.currentRow()
+        if row < 0:
+            return
+        rid = self._ui.role_list.item(row).data(QtCore.Qt.ItemDataRole.UserRole)
+        role = next((r for r in self._roles if r.id == rid), None)
+        if not role:
+            return
+        from .role_manager import RoleEditDialog
+        dlg = RoleEditDialog(self, role)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            nr = dlg.result_role
+            nr.id = rid
+            for i, r in enumerate(self._roles):
+                if r.id == rid:
+                    self._roles[i] = nr
+                    break
+            self._refresh_role_list()
+            self._preview_timer.start()
+
+    def _role_del(self) -> None:
+        row = self._ui.role_list.currentRow()
+        if row < 0:
+            return
+        rid = self._ui.role_list.item(row).data(QtCore.Qt.ItemDataRole.UserRole)
+        if rid in (0, 1):
+            QMessageBox.information(self, "提示", "默认手写与打印体不可删除")
+            return
+        self._roles = [r for r in self._roles if r.id != rid]
+        self._refresh_role_list()
+        self._preview_timer.start()
+
+    def _role_manage(self) -> None:
+        dlg = RoleManagerDialog(self, self._roles)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._roles = dlg.result_roles
+            self._refresh_role_list()
+            self._preview_timer.start()
+
+    # 划选标记与高亮预览
+    _ROLE_BG = {0: None, 1: QtGui.QColor("#e8e8e8"), 2: QtGui.QColor("#fff8b8"), 3: QtGui.QColor("#d1ffd1"), 4: QtGui.QColor("#c8e8ff")}
+    def _role_bg(self, rid: int) -> QtGui.QColor | None:
+        if rid in self._ROLE_BG:
+            return self._ROLE_BG[rid]
+        return QtGui.QColor(role_background(rid))
+
+    def _ensure_role(self, rid: int) -> None:
+        if any(r.id == rid for r in self._roles):
+            return
+        # 动态按需创建手写角色（不在默认里预置）
+        name = f"手写角色{rid-1}" if rid >= 2 else f"角色{rid}"
+        self._roles.append(HandwritingRole(id=rid, name=name, printed=False))
+        self._roles = sorted(self._roles, key=lambda r: r.id)
+        self._refresh_role_list()
+
+    def _mark_selection(self, role_id: int) -> None:
+        cursor = self._ui.textEdit.textCursor()
+        if not cursor.hasSelection():
+            # 无选区则对当前词/行不作处理，提示用户先划选
+            return
+        if role_id >= 2:
+            self._ensure_role(role_id)
+        fmt = QtGui.QTextCharFormat()
+        bg = self._role_bg(role_id)
+        if bg is None or role_id == 0:
+            fmt.clearBackground()
+        else:
+            fmt.setBackground(bg)
+        # 将 role_id 存入 UserProperty 以便后续收集
+        fmt.setProperty(QtGui.QTextFormat.Property.UserProperty, role_id)
+        cursor.mergeCharFormat(fmt)
+        # 标记后自动预览
+        self._preview_timer.start()
+
+    def _update_mark_buttons(self) -> None:
+        has = self._ui.textEdit.textCursor().hasSelection()
+        self._ui.btn_mark_print.setEnabled(has)
+        self._ui.btn_mark_role1.setEnabled(has)
+        self._ui.btn_mark_role2.setEnabled(has)
+        self._ui.btn_mark_clear.setEnabled(has)
 
     def _connect_auto_preview(self) -> None:
         """文本或任意参数变化时防抖自动预览（参数不完整时静默跳过）。
@@ -213,9 +352,9 @@ class MainWindow(QMainWindow):
         self._preview_timer.start()
 
     def _set_paragraphs(self, paras) -> None:
-        """将段落列表回填为富文本。"""
+        """将段落列表回填为富文本（含 Run 角色背景）。"""
         from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QTextBlockFormat, QTextCursor
+        from PyQt6.QtGui import QTextBlockFormat, QTextCharFormat, QTextCursor
 
         editor = self._ui.textEdit
         editor.clear()
@@ -223,29 +362,92 @@ class MainWindow(QMainWindow):
         for idx, para in enumerate(paras):
             if idx:
                 cursor.insertBlock()
-            fmt = QTextBlockFormat()
+            bfmt = QTextBlockFormat()
             if para.align == "center":
-                fmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                bfmt.setAlignment(Qt.AlignmentFlag.AlignCenter)
             elif para.align == "right":
-                fmt.setAlignment(Qt.AlignmentFlag.AlignRight)
+                bfmt.setAlignment(Qt.AlignmentFlag.AlignRight)
             if para.first_line_indent:
-                fmt.setTextIndent(para.first_line_indent)
-            cursor.setBlockFormat(fmt)
-            cursor.insertText(para.text)
+                bfmt.setTextIndent(para.first_line_indent)
+            cursor.setBlockFormat(bfmt)
+            # 若含 runs，按角色逐段插入并附背景色与 UserProperty（含字体信息以便打印体沿用原文系统字体及加粗）
+            if para.runs:
+                for run in para.runs:
+                    cfmt = QTextCharFormat()
+                    bg = self._role_bg(run.role_id)
+                    if bg is not None and run.role_id != 0:
+                        cfmt.setBackground(bg)
+                    cfmt.setProperty(QTextCharFormat.Property.UserProperty, run.role_id)
+                    if run.font_family:
+                        cfmt.setProperty(QTextCharFormat.Property.UserProperty + 1, run.font_family)
+                    if run.font_size:
+                        cfmt.setProperty(QTextCharFormat.Property.UserProperty + 2, int(run.font_size))
+                    if run.font_file:
+                        cfmt.setProperty(QTextCharFormat.Property.UserProperty + 3, run.font_file)
+                    if getattr(run, "bold", False):
+                        cfmt.setProperty(QTextCharFormat.Property.UserProperty + 4, True)
+                        # 编辑器内直观加粗预览（仅打印体）
+                        cfmt.setFontWeight(QtGui.QFont.Weight.Bold)
+                    cursor.setCharFormat(cfmt)
+                    cursor.insertText(run.text)
+            else:
+                cursor.insertText(para.text)
         editor.setTextCursor(cursor)
 
     def _import_docx(self) -> None:
-        from ..core.docx_io import load_paragraphs
-
         path, _ = QFileDialog.getOpenFileName(self, "导入 docx", "", "Word 文档 (*.docx)")
         if not path:
             return
         try:
-            paras = load_paragraphs(path, self._int_of(self._ui.lineEdit_9, 36))
+            paras = load_paragraphs_with_runs(path, self._int_of(self._ui.lineEdit_9, 36))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
+        # 检查打印体原文系统字体是否缺失，缺失则让用户自选（手写体固定用用户手写字体，无需检查）
+        missing: dict[str, list] = {}
+        for p in paras:
+            for r in p.runs or []:
+                if r.role_id == 1 and r.font_family and not r.font_file:
+                    missing.setdefault(r.font_family, []).append(r)
+        if missing:
+            msg = "检测到以下打印字体未在本机安装：\n" + "\n".join(f"· {fam}" for fam in missing) + "\n\n是否手动为它们选择字体文件？\n（取消则使用默认打印字体/角色字体）"
+            ret = QMessageBox.question(self, "缺失字体", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                for fam, runs in list(missing.items()):
+                    fp, _ = QFileDialog.getOpenFileName(self, f"选择字体文件对应 ‘{fam}’", "", "字体 (*.ttf *.ttc *.otf)")
+                    if fp and Path(fp).is_file():
+                        for rr in runs:
+                            rr.font_file = fp
+                    # 若用户取消该项，保持 r.font_file 为 None，渲染时回落到打印角色/主字体
+        # 将打印体原文系统字体同步到打印角色（便于在角色管理里直观显示“宋体/微软雅黑”等，而非“跟随主字体”）
+        # 统计打印 runs 中最常见的系统字体文件
+        try:
+            from collections import Counter
+            printed_files = [r.font_file for p in paras for r in (p.runs or []) if r.role_id == 1 and r.font_file]
+            if printed_files:
+                most_common, _ = Counter(printed_files).most_common(1)[0]
+                for rr in self._roles:
+                    if rr.id == 1 and not rr.font_path:
+                        rr.font_path = most_common
+                        break
+                # 若打印角色还未在列表（极少），同步到 new_roles
+                for nr in [r for r in extract_roles_from_paragraphs(paras) if r.id == 1]:
+                    if not nr.font_path and most_common:
+                        nr.font_path = most_common
+        except Exception:
+            pass
+        # 动态角色：按文档中出现的背景高亮自动扩展角色表
+        new_roles = extract_roles_from_paragraphs(paras)
+        # 合并到现有角色：保留已自定义的字体/颜色，仅补新增 id
+        existing_ids = {r.id for r in self._roles}
+        for nr in new_roles:
+            if nr.id not in existing_ids:
+                # 为新增高亮角色赋默认样式：保持默认手写字体，颜色按 run 的标记？此处颜色延用默认
+                self._roles.append(nr)
+        self._roles = sorted(self._roles, key=lambda r: r.id)
+        self._refresh_role_list()
         self._set_paragraphs(paras)
+        self._preview_timer.start()
 
     # ------------------------------------------------------------------
     # 框选文字区域（手写 / 打印混排）
@@ -596,6 +798,7 @@ class MainWindow(QMainWindow):
         p = HandwritingParams()
         p.text = ui.textEdit.toPlainText()
         p.paragraphs = self._collect_paragraphs()
+        p.roles = [copy.copy(r) for r in self._roles]
         p.font_path = ui.lineEdit.text().strip()
         p.background_path = ui.lineEdit_2.text().strip()
         # 文档多页底图：仅当背景仍指向文档首页时生效（手动改背景即失效）
@@ -625,22 +828,31 @@ class MainWindow(QMainWindow):
         return p
 
     def _collect_paragraphs(self):
-        """从富文本编辑器的块格式收集段落。
+        """从富文本编辑器的块/字符格式收集段落（含 Run 角色）。
 
         空行保留为空段落，使渲染结果与纯文本路径的空行行为一致；
         全文为空时返回 []，交由校验提示未输入文字。
+        通过 QTextFragment 的 UserProperty 或背景色还原 role_id，
+        合并连续同角色片段为 TextRun，实现自然流式混排。
         """
         from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QTextCharFormat
 
-        from ..core.models import Paragraph
+        from ..core.models import Paragraph, TextRun
 
+        # 背景色到 role_id 的反向映射（与 _role_bg、role_background 保持一致）
+        bg_to_role: dict[str, int] = {
+            QtGui.QColor("#e8e8e8").name(): 1,
+            QtGui.QColor("#fff8b8").name(): 2,
+            QtGui.QColor("#d1ffd1").name(): 3,
+            QtGui.QColor("#c8e8ff").name(): 4,
+            QtGui.QColor("#ffd8f0").name(): 5,
+        }
         doc = self._ui.textEdit.document()
         paras: list[Paragraph] = []
         has_text = False
         for i in range(doc.blockCount()):
             block = doc.findBlockByNumber(i)
-            # 保留原始文本（含首尾空格）：左对齐时前导空格用于手动定位，
-            # 右对齐时尾部空格用于把文字从右缘顶进来
             raw = block.text()
             if raw.strip():
                 has_text = True
@@ -652,16 +864,99 @@ class MainWindow(QMainWindow):
                 align = "right"
             else:
                 align = "left"
-            paras.append(
-                Paragraph(text=raw, align=align, first_line_indent=int(fmt.textIndent()))
-            )
+            # 收集该块内各 fragment 的角色（含字体信息，打印体沿用原文系统字体）
+            runs: list[TextRun] = []
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    text = frag.text()
+                    if text:
+                        cf = frag.charFormat()
+                        rid_val = cf.property(QTextCharFormat.Property.UserProperty)
+                        if isinstance(rid_val, int) and rid_val >= 0:
+                            rid = rid_val
+                        else:
+                            # 兼容：无 UserProperty 时按背景色推断
+                            bg = cf.background()
+                            if bg.style() != Qt.BrushStyle.NoBrush:
+                                name = bg.color().name().lower()
+                                rid = bg_to_role.get(name, 0)
+                                # 额外容忍未列入的动态角色背景（取 role_background 推断）
+                                if rid == 0:
+                                    for cand in range(2, 20):
+                                        if QtGui.QColor(role_background(cand)).name().lower() == name:
+                                            rid = cand
+                                            break
+                            else:
+                                rid = 0
+                        # 取字体信息（仅打印体有效，手写体忽略）及加粗
+                        fam_val = cf.property(QTextCharFormat.Property.UserProperty + 1)
+                        size_val = cf.property(QTextCharFormat.Property.UserProperty + 2)
+                        file_val = cf.property(QTextCharFormat.Property.UserProperty + 3)
+                        bold_val = cf.property(QTextCharFormat.Property.UserProperty + 4)
+                        fam = str(fam_val).strip() if isinstance(fam_val, str) and fam_val else None
+                        try:
+                            fsize = int(size_val) if isinstance(size_val, int) and size_val > 0 else None
+                        except Exception:
+                            fsize = None
+                        ffile = str(file_val).strip() if isinstance(file_val, str) and file_val else None
+                        if fam and not ffile:
+                            # 若仅有 family 但无文件，尝试即时解析
+                            try:
+                                from ..core.system_fonts import family_to_file as _ftf
+                                p = _ftf(fam)
+                                if p and Path(p).is_file():
+                                    ffile = str(p)
+                            except Exception:
+                                pass
+                        # 加粗：优先 UserProperty，其次编辑器字重（用于粘贴或历史数据）
+                        is_bold = False
+                        if isinstance(bold_val, bool):
+                            is_bold = bold_val
+                        elif bold_val not in (None, ""):
+                            is_bold = bool(bold_val)
+                        else:
+                            try:
+                                is_bold = cf.fontWeight() >= QtGui.QFont.Weight.Bold
+                            except Exception:
+                                is_bold = False
+                        # 仅打印体保留加粗，手写体忽略原文加粗
+                        if rid != 1:
+                            is_bold = False
+                        # 合并连续同 role+字体+加粗 的片段
+                        if runs and runs[-1].role_id == rid and runs[-1].font_family == fam and runs[-1].font_size == fsize and runs[-1].font_file == ffile and getattr(runs[-1], "bold", False) == is_bold:
+                            runs[-1].text += text
+                        else:
+                            runs.append(TextRun(text=text, role_id=rid, font_family=fam, font_size=fsize, font_file=ffile, bold=is_bold))
+                it += 1
+            # 若块无有效 fragment（如空行），构造空 text
+            if not runs:
+                runs = [TextRun(text=raw, role_id=0)] if raw else [TextRun(text="", role_id=0)]
+                # 去除纯空行的冗余 role 包装，外层会判 has_text
+                if not raw.strip():
+                    paras.append(Paragraph(text="", align=align, first_line_indent=int(fmt.textIndent()), runs=None))
+                    continue
+            # 单一默认角色且文本与 raw 一致时，退化为 text 兼容模式
+            if len(runs) == 1 and runs[0].role_id == 0 and runs[0].text == raw:
+                paras.append(Paragraph(text=raw, align=align, first_line_indent=int(fmt.textIndent()), runs=None))
+            else:
+                # 多角色或非对齐情况，保留完整 runs
+                plain = "".join(r.text for r in runs)
+                # 确保 plain 与 raw 基本一致（fragment 可能丢失最后换行）
+                paras.append(Paragraph(text=plain or raw, align=align, first_line_indent=int(fmt.textIndent()), runs=runs))
         return paras if has_text else []
 
     def apply_params(self, p: HandwritingParams) -> None:
         """将 HandwritingParams 回填到界面控件。"""
         ui = self._ui
+        # 角色回填
+        if p.roles is not None:
+            self._roles = [copy.copy(r) for r in p.roles]
+            self._refresh_role_list()
         # 预设不含文本内容：仅当预设自带文本时才回填，否则保留当前输入
         if p.paragraphs:
+            # 若预设含角色，段落中的 role_id 需与当前角色一致；此处先按预设角色合并
             self._set_paragraphs(p.paragraphs)
         elif p.text:
             ui.textEdit.setPlainText(p.text)
@@ -908,28 +1203,44 @@ class MainWindow(QMainWindow):
         for attr in self._SPATIAL_ATTRS:
             setattr(preview, attr, getattr(preview, attr) * scale)
         preview.font_size = max(1.0, preview.font_size)
+        if params.roles is not None:
+            preview.roles = []
+            for r in params.roles:
+                nr = copy.copy(r)
+                if nr.font_size:
+                    nr.font_size = max(1, round(nr.font_size * scale))
+                if nr.font_size_sigma is not None:
+                    nr.font_size_sigma = max(0, round(nr.font_size_sigma * scale))
+                if nr.perturb_x_sigma is not None:
+                    nr.perturb_x_sigma = max(0, round(nr.perturb_x_sigma * scale))
+                if nr.perturb_y_sigma is not None:
+                    nr.perturb_y_sigma = max(0, round(nr.perturb_y_sigma * scale))
+                preview.roles.append(nr)
         if params.paragraphs:
-            preview.paragraphs = [
-                Paragraph(
-                    text=p.text,
-                    align=p.align,
-                    first_line_indent=p.first_line_indent * scale,
-                )
-                for p in params.paragraphs
-            ]
-        # 框选区域同样按比例缩放到预览坐标（深拷贝，保留全部排版、对齐、覆盖项与段落）
-        preview.regions = []
-        for r in params.regions or []:
-            scaled_paras = None
-            if r.paragraphs:
-                scaled_paras = [
+            preview.paragraphs = []
+            for p in params.paragraphs:
+                runs = None
+                if p.runs:
+                    runs = [TextRun(text=r.text, role_id=r.role_id, color=r.color) for r in p.runs]
+                preview.paragraphs.append(
                     Paragraph(
                         text=p.text,
                         align=p.align,
                         first_line_indent=p.first_line_indent * scale,
+                        runs=runs,
                     )
-                    for p in r.paragraphs
-                ]
+                )
+        # 框选区域同样按比例缩放到预览坐标（深拷贝，保留全部排版、对齐、覆盖项与段落/runs）
+        preview.regions = []
+        for r in params.regions or []:
+            scaled_paras = None
+            if r.paragraphs:
+                scaled_paras = []
+                for p in r.paragraphs:
+                    runs = None
+                    if p.runs:
+                        runs = [TextRun(text=rr.text, role_id=rr.role_id, color=rr.color) for rr in p.runs]
+                    scaled_paras.append(Paragraph(text=p.text, align=p.align, first_line_indent=p.first_line_indent * scale, runs=runs))
             preview.regions.append(
                 TextRegion(
                     x=round(r.x * scale),

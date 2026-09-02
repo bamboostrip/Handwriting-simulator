@@ -24,7 +24,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy import ndimage
 
-from .models import HandwritingParams, Paragraph, TextRegion
+from .models import HandwritingParams, Paragraph, TextRegion, TextRun, HandwritingRole, parse_color
+
+try:
+    from .system_fonts import family_to_file as _family_to_file
+except Exception:  # 导入失败时降级为空实现
+    def _family_to_file(family: str):  # type: ignore
+        return None
 
 # 4-连通邻域结构
 _CONNECTIVITY = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
@@ -357,17 +363,51 @@ def _split_text_rows(rows: np.ndarray) -> list[tuple[int, int]]:
     return groups
 
 
-def _layout_paragraph(
+# ---------------------------------------------------------------------------
+# 多角色 Run 混排辅助
+# ---------------------------------------------------------------------------
+
+def _color_hex_for_run(params: HandwritingParams, run: TextRun, role: HandwritingRole | None) -> str:
+    if run.color:
+        return run.color
+    if role and role.color:
+        return role.color
+    return params.color
+
+def _effective_font_for_run(
+    params: HandwritingParams, role: HandwritingRole | None, size: int,
+    font_cache_keyed: dict[tuple[str, int], ImageFont.FreeTypeFont]
+) -> ImageFont.FreeTypeFont:
+    fp = role.font_path if (role and role.font_path) else params.font_path
+    # 缓存 key (路径, 字号)
+    key = (fp, size)
+    cached = font_cache_keyed.get(key)
+    if cached is not None:
+        return cached
+    try:
+        font = ImageFont.truetype(fp, size=size)
+    except Exception:
+        # 回退主字体
+        font = ImageFont.truetype(params.font_path, size=size)
+    font_cache_keyed[key] = font
+    return font
+
+def _role_perturb_overrides(params: HandwritingParams, role: HandwritingRole | None) -> tuple[int, int, float]:
+    """返回该角色实际的 (perturb_x, perturb_y, perturb_theta)；打印体强制 0。"""
+    if role and role.printed:
+        return 0, 0, 0.0
+    px = role.perturb_x_sigma if (role and role.perturb_x_sigma is not None) else params.perturb_x_sigma
+    py = role.perturb_y_sigma if (role and role.perturb_y_sigma is not None) else params.perturb_y_sigma
+    pt = role.perturb_theta_sigma if (role and role.perturb_theta_sigma is not None) else params.perturb_theta_sigma
+    return int(px), int(py), float(pt)
+
+def _layout_paragraph_plain(
     params: HandwritingParams,
     rand: random.Random,
     paragraph: Paragraph,
     width: int,
 ) -> list[tuple[np.ndarray | None, float]]:
-    """渲染单个段落，返回逐行列表 [(该行裁剪墨迹 mask, 墨迹相对该行绘制基线的偏移)]。
-
-    空行对应 (None, 0.0)，仅占用行节奏。画布按段落自身高度创建
-    （不受页高裁剪），以便拼接时像纯文本路径一样逐行流式跨页。
-    """
+    """原 _layout_paragraph 的纯文本实现（兼容保持不变）。"""
     base_font = ImageFont.truetype(params.font_path, size=int(params.font_size))
     font_cache: dict[int, ImageFont.FreeTypeFont] = {}
     font_size = params.font_size
@@ -531,6 +571,326 @@ def _layout_paragraph(
     return lines
 
 
+def _layout_paragraph_mixed(
+    params: HandwritingParams,
+    rand: random.Random,
+    paragraph: Paragraph,
+    width: int,
+) -> list[tuple[dict[str, np.ndarray] | None, float]]:
+    """多 Run 混排段落渲染，返回逐行列表 [(该行各颜色的mask字典, 偏移)]。
+
+    每个字典 key 为 #RRGGBB 颜色，value 为该行该颜色的裁剪掩码（H行×W列）。
+    空行对应 (None, 0.0)。画布高度按段落自身高度创建。
+    支持不同 Run 不同字体/字号/颜色同行混排，自然换行。
+    """
+    # 角色映射
+    role_map: dict[int, HandwritingRole] = {r.id: r for r in params.effective_roles()}
+    runs = paragraph.runs or []
+    if not runs:
+        return [(None, 0.0)]
+    # 为每个 Run 解析有效字体/颜色
+    # 缓存 (font_path, size) -> font
+    font_cache_keyed: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+    offset_cache: dict[tuple[str, int, str], int] = {}  # (font_path, size, ch) -> advance
+    # 为便于后续测量，预构建 run_infos
+    # 每个 run 的基础字号（未扰动）
+    run_bases: list[tuple[str, str, int, str, bool, HandwritingRole | None, bool]] = []  # (text, font_path, base_size, color_hex, printed, role, bold)
+    distinct_colors: set[str] = set()
+    for run in runs:
+        role = role_map.get(run.role_id)
+        is_printed = (role.printed if role else False)
+        # 手写体：固定用用户选择的手写字体（忽略 docx 原字体/加粗）
+        # 打印体：优先沿用 docx 提取的系统字体/字号/加粗，若缺失则回落角色/全局字体
+        is_bold = bool(getattr(run, "bold", False)) and is_printed
+        if is_printed and (run.font_family or run.font_file or run.font_size or is_bold):
+            # 字体文件优先
+            if run.font_file and Path(run.font_file).is_file():
+                fp = run.font_file
+            elif run.font_family:
+                try:
+                    p = _family_to_file(run.font_family)
+                    if p and Path(p).is_file():
+                        fp = str(p)
+                    else:
+                        fp = role.font_path if (role and role.font_path) else params.font_path
+                except Exception:
+                    fp = role.font_path if (role and role.font_path) else params.font_path
+            else:
+                fp = role.font_path if (role and role.font_path) else params.font_path
+            if run.font_size and run.font_size > 0:
+                base_sz = int(run.font_size)
+            else:
+                base_sz = (role.font_size if (role and role.font_size > 0) else int(params.font_size))
+        else:
+            fp = role.font_path if (role and role.font_path) else params.font_path
+            base_sz = (role.font_size if (role and role.font_size > 0) else int(params.font_size))
+        col = _color_hex_for_run(params, run, role)
+        printed = is_printed
+        distinct_colors.add(col.lower())
+        run_bases.append((run.text, fp, base_sz, col.lower(), printed, role, is_bold))
+
+    line_spacing = float(params.line_spacing) + float(params.font_size)
+    end_chars = params.end_chars
+    start_chars = params.start_chars
+    left = params.left_margin
+    right = params.right_margin
+
+    # 扁平字符流：记录每个字符归属的 run_idx，便于按 run 取字体/颜色
+    # 结构: (ch, run_idx)
+    flat: list[tuple[str, int]] = []
+    for idx, (text, _, _, _, _, _, _) in enumerate(run_bases):
+        for ch in text:
+            flat.append((ch, idx))
+    n = len(flat)
+    miswrite_rate = params.miswrite_rate
+    miswrite_active = miswrite_rate > 0
+    mode = params.miswrite_rewrite_mode
+    strikeout_style = params.miswrite_strikeout_style
+
+    def char_font_and_size(run_idx: int, size: int) -> ImageFont.FreeTypeFont:
+        _, fp, _, _, _, _, _ = run_bases[run_idx]
+        # 直接使用 run_bases 解析好的 fp（含打印体原文系统字体），避免再次回落到角色字体
+        key = (fp, size)
+        cached = font_cache_keyed.get(key)
+        if cached is not None:
+            return cached
+        try:
+            font = ImageFont.truetype(fp, size=size)
+        except Exception:
+            # 回落手写主字体
+            try:
+                font = ImageFont.truetype(params.font_path, size=size)
+            except Exception:
+                font = ImageFont.load_default()
+        font_cache_keyed[key] = font
+        return font
+
+    def char_offset_for(run_idx: int, size: int, ch: str) -> int:
+        _, fp, _, _, _, _, _ = run_bases[run_idx]
+        key = (fp, size, ch)
+        cached = offset_cache.get(key)
+        if cached is not None:
+            return cached
+        font = char_font_and_size(run_idx, size)
+        off = font.getbbox(ch)[2] - font.getbbox(ch)[0]
+        offset_cache[key] = off
+        return off
+
+    # 阶段一：排版规划，消耗随机数与纯文本路径一致的顺序（但 per-run 字体影响宽度）
+    # 记录每字 (wrong_ch, correct_ch, x, yj, size, li, miswrite, angle, local_seed, rewrite_x, run_idx, color, bold)
+    chars: list[tuple[str, str, float, int, int, int, bool, float, int, float, int, str, bool]] = []
+    line_x_ends: list[float] = []
+    line_ys: list[float] = []
+    i = 0
+    y = line_spacing - float(params.font_size)
+    # run pointer通过 flat 索引 i 来定位
+    # 为便于换行判断，我们需要在内层通过 flat[i] 获取当前 run_idx 与字符
+    line_start_i = 0
+    # 简化：直接按 flat 顺序推进，但段首缩进仅第一行生效
+    # 为与 plain 一致，段首缩进加入首行 x 起点
+    # 这里复刻 plain 的两层循环结构，但字符源改为 flat
+    # 外层：行
+    pos = 0
+    while pos < n:
+        line_ys.append(y)
+        # 首行缩进仅对段内首行生效（pos==0 时）
+        if pos == 0:
+            x = left + paragraph.first_line_indent
+        else:
+            x = left
+        # 内层：行内字符
+        while pos < n:
+            ch, run_idx = flat[pos]
+            _, fp, base_sz, col, _, _, is_bold = run_bases[run_idx]
+            if ch == "\n":
+                pos += 1
+                break
+            # 换行判断：使用该 run 的 base_sz 作为阈值参考（类似 plain 的 font_size）
+            # 为保证不同字号混排时行尾判断仍稳定，取当前字符对应 base_sz
+            cur_font_size = base_sz
+            if x > width - right - 2 * cur_font_size and ch in start_chars:
+                break
+            if x > width - right - cur_font_size and ch not in end_chars:
+                break
+            yj = round(rand.gauss(y, params.line_spacing_sigma))
+            size = base_sz
+            if params.font_size_sigma:
+                size = max(round(rand.gauss(base_sz, params.font_size_sigma)), 1)
+            word_noise = rand.gauss(0, params.word_spacing_sigma)
+            miswrite = False
+            wrong_ch = ch
+            angle = 0.0
+            local_seed = 0
+            if miswrite_active and rand.random() < miswrite_rate:
+                # 对于打印体角色，跳过错字（角色级 printed 强制不写错）
+                role = role_map.get(runs[run_idx].role_id)
+                if not (role and role.printed):
+                    miswrite = True
+                    wrong_ch = _wrong_char(ch, rand)
+                    angle = rand.gauss(0, 0.15)
+                    local_seed = rand.getrandbits(64)
+            # 测量 wrong_ch 在扰动后字号下的宽度（加粗时额外 +1px 模拟描边宽度）
+            font_for_measure = char_font_and_size(run_idx, size)
+            offset = char_offset_for(run_idx, size, wrong_ch)
+            if is_bold:
+                offset += 1
+            x_next = x + params.word_spacing + offset + word_noise
+            rewrite_x = x_next if (miswrite and mode == "rewrite") else 0.0
+            chars.append((wrong_ch, ch, x, yj, size, len(line_ys)-1, miswrite, angle, local_seed, rewrite_x, run_idx, col, is_bold))
+            x = x_next
+            if miswrite and mode == "rewrite":
+                # 重写字的宽度额外推进（加粗同样 +1）
+                extra = 1 if is_bold else 0
+                x += char_offset_for(run_idx, size, ch) + extra + params.word_spacing
+            pos += 1
+            # 若刚填满一行且下一个字符会导致超宽，外层循环会换行；这里继续直到 pos 满行条件在下一迭代触发
+        line_x_ends.append(x)
+        y += line_spacing
+        # 若当前 pos 指向的字符是 \n 已在内层break消费，无需额外处理
+        # 否则若因宽度触发 break，则保留 pos 不动，外层开启新行
+
+    if not line_ys:
+        return []
+
+    # 对齐位移
+    shifts: list[float] | None = None
+    if paragraph.align == "right":
+        right_x = float(width) - float(right)
+        shifts = [right_x - xe for xe in line_x_ends]
+    center_shifts: list[float] | None = None
+    if paragraph.align == "center":
+        min_x = [float("inf")] * len(line_ys)
+        max_x = [float("-inf")] * len(line_ys)
+        for wrong_ch, correct_ch, cx, cy, size, li, miswrite, angle, local_seed, rewrite_x, run_idx, col, is_bold in chars:
+            font = char_font_and_size(run_idx, size)
+            w = char_offset_for(run_idx, size, wrong_ch) + (1 if is_bold else 0)
+            if cx < min_x[li]:
+                min_x[li] = cx
+            right_w = cx + w
+            if miswrite and mode == "rewrite":
+                # 重写字也在同一颜色层，仍按其宽度计算右边界（重写字跟随原 Run 是否加粗）
+                rw = char_offset_for(run_idx, size, correct_ch) + (1 if is_bold else 0)
+                right_w = max(right_w, rewrite_x + rw)
+            if right_w > max_x[li]:
+                max_x[li] = right_w
+        center_shifts = [
+            0.0 if min_x[li] > max_x[li] else (float(width) - (max_x[li] - min_x[li])) / 2.0 - min_x[li]
+            for li in range(len(line_ys))
+        ]
+
+    # 阶段二：按颜色分层绘制
+    canvas_h = max(int(y + float(params.font_size) + 4 * float(params.line_spacing_sigma) + 4), 1)
+    # 颜色 -> PIL 1-bit 画布
+    color_to_image: dict[str, Image.Image] = {}
+    color_to_draw: dict[str, ImageDraw.ImageDraw] = {}
+    for col in distinct_colors:
+        img = Image.new("1", (width, canvas_h), 0)
+        color_to_image[col] = img
+        color_to_draw[col] = ImageDraw.Draw(img)
+    # 额外颜色可能在绘制时动态出现（如标签新色），兜底
+    for wrong_ch, correct_ch, cx, cy, size, li, miswrite, angle, local_seed, rewrite_x, run_idx, col, is_bold in chars:
+        # 动态颜色兜底：若该颜色未预建，创建画布
+        if col not in color_to_image:
+            img = Image.new("1", (width, canvas_h), 0)
+            color_to_image[col] = img
+            color_to_draw[col] = ImageDraw.Draw(img)
+        font = char_font_and_size(run_idx, size)
+        shift = 0.0
+        if shifts is not None:
+            shift = shifts[li]
+        elif center_shifts is not None:
+            shift = center_shifts[li]
+        dx = cx + shift
+        draw = color_to_draw[col]
+        # 加粗：打印体 bold 用描边模拟（兼容 1-bit 模式）
+        if is_bold:
+            try:
+                draw.text((round(dx), cy), wrong_ch, fill=1, font=font, stroke_width=1, stroke_fill=1)
+            except TypeError:
+                # Pillow 旧版或 1 模式不支持 stroke，回退为雙描
+                draw.text((round(dx), cy), wrong_ch, fill=1, font=font)
+                draw.text((round(dx)+1, cy), wrong_ch, fill=1, font=font)
+        else:
+            draw.text((round(dx), cy), wrong_ch, fill=1, font=font)
+        if miswrite:
+            local = random.Random(local_seed)
+            wrong_advance = char_offset_for(run_idx, size, wrong_ch) + (1 if is_bold else 0)
+            # 错字删除线绘制在同一颜色层；需要字体与缓存的 font
+            def resolve_for_mis(s: int):
+                return char_font_and_size(run_idx, s)
+            _draw_miswrite(
+                draw, local, dx, cy, size, wrong_advance, angle,
+                strikeout_style, font, correct_ch, mode == "above",
+                resolve_for_mis, {},  # offset cache alternative not needed
+            )
+            if mode == "rewrite":
+                if is_bold:
+                    try:
+                        draw.text((round(rewrite_x + shift), cy), correct_ch, fill=1, font=font, stroke_width=1, stroke_fill=1)
+                    except TypeError:
+                        draw.text((round(rewrite_x + shift), cy), correct_ch, fill=1, font=font)
+                        draw.text((round(rewrite_x + shift)+1, cy), correct_ch, fill=1, font=font)
+                else:
+                    draw.text((round(rewrite_x + shift), cy), correct_ch, fill=1, font=font)
+
+    # 转为 numpy 并求并集用于行带切分
+    color_to_mask: dict[str, np.ndarray] = {c: np.asarray(img, dtype=bool) for c, img in color_to_image.items()}
+    # union
+    if color_to_mask:
+        union = np.zeros((canvas_h, width), dtype=bool)
+        for m in color_to_mask.values():
+            union |= m
+    else:
+        union = np.zeros((canvas_h, width), dtype=bool)
+    rows = np.any(union, axis=1)
+    bands = _split_text_rows(rows)
+    lines: list[tuple[dict[str, np.ndarray] | None, float]] = []
+    bi = 0
+    off_min = -0.85 * float(params.font_size) - 0.25 * line_spacing
+    off_max = 0.8 * line_spacing
+    for yk in line_ys:
+        if bi < len(bands) and bands[bi][0] < yk + line_spacing / 2:
+            s = bands[bi][0]
+            e = bands[bi][1]
+            bi += 1
+            while bi < len(bands) and bands[bi][0] < yk + line_spacing / 2:
+                e = bands[bi][1]
+                bi += 1
+            off = min(max(float(s) - yk, off_min), off_max)
+            # 为该行提取各颜色切片
+            band_dict: dict[str, np.ndarray] = {}
+            for col, full in color_to_mask.items():
+                sl = full[s:e]
+                if sl.any():
+                    band_dict[col] = sl.copy()
+            lines.append((band_dict if band_dict else None, off))
+        else:
+            lines.append((None, 0.0))
+    return lines
+
+
+def _layout_paragraph(
+    params: HandwritingParams,
+    rand: random.Random,
+    paragraph: Paragraph,
+    width: int,
+) -> list[tuple[np.ndarray | None, float]] | list[tuple[dict[str, np.ndarray] | None, float]]:
+    """分发：含 runs 的段落走多角色混排，否则走纯文本路径。
+
+    返回类型为 Union：纯文本返回 (mask|None, off)，混排返回 (dict|None, off)。
+    调用方需通过 isinstance 检查区分。
+    """
+    if paragraph.runs is not None and any(r.text for r in paragraph.runs):
+        # 若仅单 Run 且 role 0，可回落 plain 以保持完全一致的随机数与像素级回归
+        if len(paragraph.runs) == 1 and paragraph.runs[0].role_id == 0 and not paragraph.runs[0].color:
+            # 退化为单 run 纯文本，等价于 paragraph.text 情况
+            # 但为保持排版输入一致，直接走 plain 用 paragraph.text 或 run.text
+            plain_para = Paragraph(text=paragraph.runs[0].text, align=paragraph.align, first_line_indent=paragraph.first_line_indent)
+            return _layout_paragraph_plain(params, rand, plain_para, width)
+        return _layout_paragraph_mixed(params, rand, paragraph, width)
+    return _layout_paragraph_plain(params, rand, paragraph, width)
+
+
 # ---------------------------------------------------------------------------
 # 笔画扰动（全向量化）
 # ---------------------------------------------------------------------------
@@ -584,6 +944,45 @@ def _perturbed_positions(
     return ny[valid], nx[valid]
 
 
+def _perturbed_positions_with_sigmas(
+    mask: np.ndarray,
+    perturb_x_sigma: int | float,
+    perturb_y_sigma: int | float,
+    perturb_theta_sigma: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """按显式 sigma 对掩码做扰动（用于多角色分色）。"""
+    height, width = mask.shape
+    if not mask.any():
+        empty = np.zeros(0, dtype=np.int64)
+        return empty, empty.copy()
+    labels, n_strokes = ndimage.label(mask, structure=_CONNECTIVITY)
+    dxs = rng.normal(0, perturb_x_sigma, n_strokes)
+    dys = rng.normal(0, perturb_y_sigma, n_strokes)
+    thetas = rng.normal(0, perturb_theta_sigma, n_strokes)
+    centers = np.zeros((n_strokes, 2), dtype=np.float64)
+    slices = ndimage.find_objects(labels)
+    for i, sl in enumerate(slices):
+        if sl is not None:
+            centers[i, 0] = (sl[1].start + sl[1].stop) / 2.0
+            centers[i, 1] = (sl[0].start + sl[0].stop) / 2.0
+    ys, xs = np.nonzero(labels > 0)
+    lbl = labels[ys, xs] - 1
+    cx = centers[lbl, 0]
+    cy = centers[lbl, 1]
+    dx = dxs[lbl]
+    dy = dys[lbl]
+    theta = thetas[lbl]
+    ct = np.cos(theta)
+    st = np.sin(theta)
+    fx = (xs - cx) * ct + (ys - cy) * st + cx
+    fy = (ys - cy) * ct - (xs - cx) * st + cy
+    nx = np.rint(fx + dx).astype(np.int64)
+    ny = np.rint(fy + dy).astype(np.int64)
+    valid = (nx >= 0) & (nx < width) & (ny >= 0) & (ny < height)
+    return ny[valid], nx[valid]
+
+
 def _perturb_mask(
     mask: np.ndarray,
     params: HandwritingParams,
@@ -594,6 +993,44 @@ def _perturb_mask(
     canvas = background.copy()
     ny, nx = _perturbed_positions(mask, params, rng)
     canvas[ny, nx] = np.array(params.fill, dtype=np.uint8)
+    return canvas
+
+
+def _perturb_mask_colored(
+    colored_masks: dict[str, np.ndarray],
+    params: HandwritingParams,
+    rng: np.random.Generator,
+    background: np.ndarray,
+) -> np.ndarray:
+    """多色版本：colored_masks key=#RRGGBB, value=bool mask；按角色 sigma 分别扰动后着色。
+
+    同色多笔画共享同一 sigma（取首个匹配角色或全局）。
+    """
+    canvas = background.copy()
+    role_by_color: dict[str, HandwritingRole | None] = {}
+    for role in params.effective_roles():
+        if role.color:
+            role_by_color[role.color.lower()] = role
+    for col_hex, mask in colored_masks.items():
+        if not mask.any():
+            continue
+        key = col_hex.lower()
+        role = role_by_color.get(key)
+        if role and role.printed:
+            px, py, pt = 0, 0, 0.0
+        elif role:
+            px = role.perturb_x_sigma if role.perturb_x_sigma is not None else params.perturb_x_sigma
+            py = role.perturb_y_sigma if role.perturb_y_sigma is not None else params.perturb_y_sigma
+            pt = role.perturb_theta_sigma if role.perturb_theta_sigma is not None else params.perturb_theta_sigma
+        else:
+            px, py, pt = params.perturb_x_sigma, params.perturb_y_sigma, params.perturb_theta_sigma
+        # 若该颜色未绑定任何角色且为默认黑，可尊重打印体？但默认手写仍走全局扰动
+        try:
+            fill = parse_color(col_hex)
+        except ValueError:
+            fill = params.fill
+        ny, nx = _perturbed_positions_with_sigmas(mask, px, py, pt, rng)
+        canvas[ny, nx] = np.array(fill, dtype=np.uint8)
     return canvas
 
 
@@ -727,11 +1164,28 @@ class FastEngine:
             rp.miswrite_rate = 0.0
         return rp
 
+    def _is_mixed(self, params: HandwritingParams) -> bool:
+        """判断主段落是否含多角色混排（任一段含 runs 且颜色/角色多样）。"""
+        if not params.paragraphs:
+            return False
+        for p in params.paragraphs:
+            if p.runs is not None and len(p.runs) > 0:
+                # 单一 run 且 role 0 且无颜色 视为非混排（走 plain 高速路径）
+                if len(p.runs) == 1 and p.runs[0].role_id == 0 and not p.runs[0].color:
+                    continue
+                return True
+        return False
+
     def _main_page_masks(
         self, params: HandwritingParams, width: int, height: int
-    ) -> list[np.ndarray]:
-        """主文字（text 或 paragraphs）的逐页墨迹掩码；无文字返回 []。"""
+    ) -> list[np.ndarray | dict[str, np.ndarray]]:
+        """主文字（text 或 paragraphs）的逐页墨迹掩码；无文字返回 []。
+
+        混排时返回 list[dict[color->mask]]，纯文本返回 list[bool mask]。
+        """
         if params.paragraphs:
+            if self._is_mixed(params):
+                return list(self._paragraph_page_masks_mixed(params, width, height))
             return list(self._paragraph_page_masks(params, width, height))
         if not params.text.strip():
             return []
@@ -758,13 +1212,14 @@ class FastEngine:
         """
         background = self._first_background(params)
         height, width = background.shape[:2]
+        is_mixed_main = self._is_mixed(params)
         main_masks = self._main_page_masks(params, width, height)
 
         # entries: (局部参数, ox, oy, rw, rh, 单页mask, 目标页索引0基)
         entries: list[tuple[HandwritingParams, int, int, int, int, np.ndarray, int]] = []
         for index, region in enumerate(params.regions or []):
             has_text = bool(region.text.strip()) or (
-                bool(region.paragraphs) and any(p.text.strip() for p in region.paragraphs)
+                bool(region.paragraphs) and any(p.plain_text().strip() for p in region.paragraphs)
             )
             if not has_text:
                 continue
@@ -778,9 +1233,27 @@ class FastEngine:
             rand = random.Random(f"{self._seed}|region{index}")
 
             # 区域排版：仅排版在所属单页内（超出直接截断）
+            # 区域目前保持 plain 渲染（区域内如需混排，可通过 region.paragraphs 的 runs 走 mixed 分页）
             if rp.paragraphs:
-                masks = list(self._paragraph_page_masks(rp, rw, rh, rand=rand))
-                mask = masks[0] if masks else np.zeros((rh, rw), dtype=bool)
+                # 检测区域段落是否混排
+                mixed = any(p.runs is not None and len(p.runs) > 1 for p in rp.paragraphs or [])
+                if mixed:
+                    masks_mixed = list(self._paragraph_page_masks_mixed(rp, rw, rh, rand=rand))
+                    # 区域仅取首页的 colored dict，转换为 union mask for region entry? 但需分色渲染，改为特殊处理：单页 dict
+                    # 为兼容 entries 的单 mask 结构，区域混排时直接取 union
+                    mm = masks_mixed[0] if masks_mixed else {}
+                    if isinstance(mm, dict):
+                        # 合并为单 bool union（仅用于区域模式的简单贴合，颜色信息暂丢失）
+                        # 若需保留分色，需重构 entries 为 dict，但此为罕见路径（区域内再混排），先 union
+                        union = np.zeros((rh, rw), dtype=bool)
+                        for v in mm.values():
+                            union |= v
+                        mask = union
+                    else:
+                        mask = mm
+                else:
+                    masks = list(self._paragraph_page_masks(rp, rw, rh, rand=rand))
+                    mask = masks[0] if masks else np.zeros((rh, rw), dtype=bool)
             else:
                 mask, _ = _layout_text(
                     rp, rand, region.text, 0, rw, rh, force_first_line=True
@@ -802,21 +1275,38 @@ class FastEngine:
                     continue
                 ys, xs = _perturbed_positions(mask, rp, self._rng)
                 canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
-            if page_index < len(main_masks) and main_masks[page_index].any():
-                canvas = _perturb_mask(main_masks[page_index], params, self._rng, canvas)
+            if page_index < len(main_masks):
+                mm = main_masks[page_index]
+                if isinstance(mm, dict):
+                    # 混排主文字：分色扰动
+                    if any(v.any() for v in mm.values()):
+                        canvas = _perturb_mask_colored(mm, params, self._rng, canvas)
+                elif isinstance(mm, np.ndarray) and mm.any():
+                    canvas = _perturb_mask(mm, params, self._rng, canvas)
             yield Image.fromarray(canvas, mode="RGB")
 
     def _paragraph_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
-        """按段落逐页渲染（逐行流式分页），在掩码基础上做笔画扰动。"""
+        """按段落逐页渲染（逐行流式分页），在掩码基础上做笔画扰动。支持混排分色。"""
         background = self._first_background(params)
         height, width = background.shape[:2]
         page_index = 0
-        for page_canvas in self._paragraph_page_masks(params, width, height):
-            yield self._finalize(
-                params, page_canvas,
-                self._page_background(params, page_index, (width, height)),
-            )
-            page_index += 1
+        if self._is_mixed(params):
+            for page_dict in self._paragraph_page_masks_mixed(params, width, height):
+                bg = self._page_background(params, page_index, (width, height))
+                # 空页也可能含零掩码
+                if any(v.any() for v in page_dict.values()):
+                    img = _perturb_mask_colored(page_dict, params, self._rng, bg)
+                else:
+                    img = bg.copy()
+                yield Image.fromarray(img, mode="RGB")
+                page_index += 1
+        else:
+            for page_canvas in self._paragraph_page_masks(params, width, height):
+                yield self._finalize(
+                    params, page_canvas,
+                    self._page_background(params, page_index, (width, height)),
+                )
+                page_index += 1
         # 文档底图剩余的空白页也输出，便于用户翻页浏览后再框选
         while page_index < self._background_count(params):
             canvas = self._page_background(params, page_index, (width, height))
@@ -843,10 +1333,26 @@ class FastEngine:
 
         all_lines: list[tuple[np.ndarray | None, float]] = []
         for para in params.paragraphs or []:
-            lines = _layout_paragraph(params, rand, para, width)
-            if not lines:
-                lines = [(None, 0.0)]  # 空段保留一行空行
-            all_lines.extend(lines)
+            lines = _layout_paragraph_plain(params, rand, para, width)
+            # _layout_paragraph 可能返回混合类型，但此方法仅处理 plain，混排走 _mixed 分支
+            # 为兼容，过滤 dict 类型
+            filtered: list[tuple[np.ndarray | None, float]] = []
+            for band, off in lines:  # type: ignore
+                if isinstance(band, dict):
+                    # 混排行中取 union 作为降级（不应进入此分支）
+                    if band:
+                        union = np.zeros(next(iter(band.values())).shape, dtype=bool)
+                        for v in band.values():
+                            # band 形状已是行裁剪后，无法直接 union 需重构，此路径仅兜底
+                            pass
+                        filtered.append((None, off))
+                    else:
+                        filtered.append((None, off))
+                else:
+                    filtered.append((band, off))
+            if not filtered:
+                filtered = [(None, 0.0)]  # 空段保留一行空行
+            all_lines.extend(filtered)
 
         page_canvas = np.zeros((height, width), dtype=bool)
         yielded = False
@@ -869,8 +1375,79 @@ class FastEngine:
         if page_canvas.any() or not yielded:
             yield page_canvas
 
+    def _paragraph_page_masks_mixed(
+        self, params: HandwritingParams, width: int, height: int, rand: random.Random | None = None
+    ) -> Iterator[dict[str, np.ndarray]]:
+        """混排版逐页掩码：yield 每页 dict[color_hex -> bool mask]。"""
+        if rand is None:
+            rand = self._new_rand()
+        line_spacing = float(params.line_spacing) + float(params.font_size)
+        lead = line_spacing - float(params.font_size)
+        top, bottom = int(params.top_margin), int(params.bottom_margin)
+        limit = height - bottom - float(params.font_size)
+
+        all_lines: list[tuple[dict[str, np.ndarray] | None, float]] = []
+        for para in params.paragraphs or []:
+            lines = _layout_paragraph(params, rand, para, width)  # type: ignore
+            # 统一为 mixed 形式：plain 行转 dict
+            converted: list[tuple[dict[str, np.ndarray] | None, float]] = []
+            for band, off in lines:  # type: ignore
+                if band is None:
+                    converted.append((None, off))
+                elif isinstance(band, dict):
+                    converted.append((band, off))
+                else:
+                    # bool mask -> dict以默认色
+                    if band.any():
+                        converted.append(({params.color.lower(): band}, off))
+                    else:
+                        converted.append((None, off))
+            if not converted:
+                converted = [(None, 0.0)]
+            all_lines.extend(converted)
+
+        # 初始化空页字典（按需创建颜色键）
+        # 为复用，先收集所有出现的颜色
+        all_colors: set[str] = set()
+        for d, _ in all_lines:
+            if d:
+                all_colors.update(d.keys())
+        # 若无颜色，使用默认
+        if not all_colors:
+            all_colors.add(params.color.lower())
+
+        page_dict: dict[str, np.ndarray] = {c: np.zeros((height, width), dtype=bool) for c in all_colors}
+        # 若中途出现新颜色，动态增键
+        yielded = False
+        draw_y = float(top) + lead
+        for band_dict, off in all_lines:
+            if draw_y > limit and any(v.any() for v in page_dict.values()):
+                yield page_dict
+                yielded = True
+                page_dict = {c: np.zeros((height, width), dtype=bool) for c in all_colors}
+                draw_y = float(top) + lead
+            if band_dict is not None:
+                # 若该行引入新颜色，扩展页字典
+                for col in list(band_dict.keys()):
+                    if col not in page_dict:
+                        page_dict[col] = np.zeros((height, width), dtype=bool)
+                        all_colors.add(col)
+                    # 同时确保其他页已有颜色同步（后续页也会有）
+                row0 = int(round(draw_y + off))
+                for col, band in band_dict.items():
+                    ys, xs = np.nonzero(band)
+                    rows = row0 + ys
+                    valid = (rows >= 0) & (rows < height)
+                    # 额外过滤 xs 范围（宽度一致，此处无需）
+                    page_dict[col][rows[valid], xs[valid]] = True
+            draw_y += line_spacing
+        if any(v.any() for v in page_dict.values()) or not yielded:
+            yield page_dict
+
     # _finalize 使用 self._rng，与 generate_pages 共用同一随机源
     def _finalize(self, params, mask, background):
+        if isinstance(mask, dict):
+            return Image.fromarray(_perturb_mask_colored(mask, params, self._rng, background), mode="RGB")
         return Image.fromarray(_perturb_mask(mask, params, self._rng, background), mode="RGB")
 
     def generate_pages(self, params: HandwritingParams) -> Iterator[Image.Image]:
