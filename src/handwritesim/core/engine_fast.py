@@ -602,7 +602,13 @@ def _layout_paragraph_mixed(
         is_printed = (role.printed if role else False)
         is_bold = bool(getattr(run, "bold", False)) and is_printed
         if is_printed and (run.font_family or run.font_file or run.font_size or is_bold):
-            if run.font_file and Path(run.font_file).is_file():
+            if is_bold and (not run.font_family or run.font_family.strip().lower() in ("仿宋", "仿宋_gb2312", "fangsong", "simfang", "宋体", "simsun")):
+                try:
+                    p = _family_to_file("黑体")
+                    fp = str(p) if p and Path(p).is_file() else (run.font_file or (role.font_path if role and role.font_path else params.font_path))
+                except Exception:
+                    fp = run.font_file or (role.font_path if role and role.font_path else params.font_path)
+            elif run.font_file and Path(run.font_file).is_file():
                 fp = run.font_file
             elif run.font_family:
                 try:
@@ -699,7 +705,7 @@ def _layout_paragraph_mixed(
         # 内层：行内字符
         while pos < n:
             ch, run_idx = flat[pos]
-            _, fp, base_sz, col, _, _, is_bold, _ = run_bases[run_idx]
+            _, fp, base_sz, col, printed, role, is_bold, r_id = run_bases[run_idx]
             if ch == "\n":
                 pos += 1
                 break
@@ -710,23 +716,26 @@ def _layout_paragraph_mixed(
                 break
             if x > width - right - cur_font_size and ch not in end_chars:
                 break
-            yj = round(rand.gauss(y, params.line_spacing_sigma))
-            size = base_sz
-            if params.font_size_sigma:
-                size = max(round(rand.gauss(base_sz, params.font_size_sigma)), 1)
-            word_noise = rand.gauss(0, params.word_spacing_sigma)
+            if printed:
+                yj = round(y)
+                size = base_sz
+                word_noise = 0.0
+            else:
+                ls_sigma = role.line_spacing_sigma if (role and role.line_spacing_sigma is not None) else params.line_spacing_sigma
+                fs_sigma = role.font_size_sigma if (role and role.font_size_sigma is not None) else params.font_size_sigma
+                ws_sigma = role.word_spacing_sigma if (role and role.word_spacing_sigma is not None) else params.word_spacing_sigma
+                yj = round(rand.gauss(y, ls_sigma)) if ls_sigma else round(y)
+                size = max(round(rand.gauss(base_sz, fs_sigma)), 1) if fs_sigma else base_sz
+                word_noise = rand.gauss(0, ws_sigma) if ws_sigma else 0.0
             miswrite = False
             wrong_ch = ch
             angle = 0.0
             local_seed = 0
-            if miswrite_active and rand.random() < miswrite_rate:
-                # 对于打印体角色，跳过错字（角色级 printed 强制不写错）
-                role = role_map.get(runs[run_idx].role_id)
-                if not (role and role.printed):
-                    miswrite = True
-                    wrong_ch = _wrong_char(ch, rand)
-                    angle = rand.gauss(0, 0.15)
-                    local_seed = rand.getrandbits(64)
+            if not printed and miswrite_active and rand.random() < miswrite_rate:
+                miswrite = True
+                wrong_ch = _wrong_char(ch, rand)
+                angle = rand.gauss(0, 0.15)
+                local_seed = rand.getrandbits(64)
             # 测量 wrong_ch 在扰动后字号下的宽度（加粗时额外 +1px 模拟描边宽度）
             font_for_measure = char_font_and_size(run_idx, size)
             offset = char_offset_for(run_idx, size, wrong_ch)
@@ -879,11 +888,17 @@ def _layout_paragraph(
     调用方需通过 isinstance 检查区分。
     """
     if paragraph.runs is not None and any(r.text for r in paragraph.runs):
-        # 若仅单 Run 且 role 0，可回落 plain 以保持完全一致的随机数与像素级回归
-        if len(paragraph.runs) == 1 and paragraph.runs[0].role_id == 0 and not paragraph.runs[0].color:
-            # 退化为单 run 纯文本，等价于 paragraph.text 情况
-            # 但为保持排版输入一致，直接走 plain 用 paragraph.text 或 run.text
-            plain_para = Paragraph(text=paragraph.runs[0].text, align=paragraph.align, first_line_indent=paragraph.first_line_indent)
+        # 若仅单 Run 且 role 0 且无自定义字体/加粗，可回落 plain 以保持完全一致的随机数与像素级回归
+        r0 = paragraph.runs[0]
+        if (
+            len(paragraph.runs) == 1
+            and r0.role_id == 0
+            and not r0.color
+            and not r0.font_family
+            and not r0.font_file
+            and not getattr(r0, "bold", False)
+        ):
+            plain_para = Paragraph(text=r0.text, align=paragraph.align, first_line_indent=paragraph.first_line_indent)
             return _layout_paragraph_plain(params, rand, plain_para, width)
         return _layout_paragraph_mixed(params, rand, paragraph, width)
     return _layout_paragraph_plain(params, rand, paragraph, width)
@@ -954,6 +969,9 @@ def _perturbed_positions_with_sigmas(
     if not mask.any():
         empty = np.zeros(0, dtype=np.int64)
         return empty, empty.copy()
+    if perturb_x_sigma == 0 and perturb_y_sigma == 0 and perturb_theta_sigma == 0.0:
+        ys, xs = np.nonzero(mask)
+        return ys, xs
     labels, n_strokes = ndimage.label(mask, structure=_CONNECTIVITY)
     dxs = rng.normal(0, perturb_x_sigma, n_strokes)
     dys = rng.normal(0, perturb_y_sigma, n_strokes)
@@ -1018,11 +1036,11 @@ def _perturb_mask_colored(
         if isinstance(key, tuple):
             rid, col_hex = key
             role = role_by_id.get(rid)
-            # 颜色以 key 中的 color 为准（run 的实际颜色）
         else:
             col_hex = key  # type: ignore
             role = role_by_color.get(col_hex.lower())
-        if role and role.printed:
+            rid = role.id if role else 0
+        if rid == 1 or (role and role.printed):
             px, py, pt = 0, 0, 0.0
         elif role:
             px = role.perturb_x_sigma if role.perturb_x_sigma is not None else params.perturb_x_sigma
@@ -1030,7 +1048,6 @@ def _perturb_mask_colored(
             pt = role.perturb_theta_sigma if role.perturb_theta_sigma is not None else params.perturb_theta_sigma
         else:
             px, py, pt = params.perturb_x_sigma, params.perturb_y_sigma, params.perturb_theta_sigma
-        # 若该颜色未绑定任何角色且为默认黑，可尊重打印体？但默认手写仍走全局扰动
         try:
             fill = parse_color(col_hex)
         except ValueError:
@@ -1176,8 +1193,15 @@ class FastEngine:
             return False
         for p in params.paragraphs:
             if p.runs is not None and len(p.runs) > 0:
-                # 单一 run 且 role 0 且无颜色 视为非混排（走 plain 高速路径）
-                if len(p.runs) == 1 and p.runs[0].role_id == 0 and not p.runs[0].color:
+                r0 = p.runs[0]
+                if (
+                    len(p.runs) == 1
+                    and r0.role_id == 0
+                    and not r0.color
+                    and not r0.font_family
+                    and not r0.font_file
+                    and not getattr(r0, "bold", False)
+                ):
                     continue
                 return True
         return False

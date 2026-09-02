@@ -33,7 +33,7 @@ _qt_root = os.path.join(os.path.dirname(PyQt6.__file__), "Qt6")
 # UI 资源 + Qt 运行时插件（排除未用 Qt 模块后 hook 不再自动收集插件，
 # 必须显式加入，否则 GUI 无法启动）
 # 只打包窗口图标 3d.ico；png 图标源文件仅留存仓库，不进 exe（避免多余体积）
-datas = [("ui/3d.ico", "ui")]
+datas = [("ui/3d.ico", "ui"), ("ui/arrow_down.svg", "ui"), ("ui/arrow_down_dark.svg", "ui")]
 for _sub in (
     "plugins/platforms",   # 窗口平台插件（qwindows/libqxcb/libqcocoa）
     "plugins/styles",      # 界面样式

@@ -5,7 +5,8 @@
   文档中首次出现的背景色 → 角色2（手写角色1），次出现 → 角色3 … 不限制黄/绿
 - 读取 <w:color w:val="..."/> 作为 Run 级颜色覆盖
 - 读取 <w:rFonts w:eastAsia/w:ascii> 与 <w:sz> 字体字号，打印体（无背景）沿用原文系统字体，
-  手写体则固定用用户选择的手写字体（背景标记段忽略原文纸质字体）
+  手写体则固定用用户选择的手写字体（背景标记段忽略原文纸质字体）；
+  Word 字号按文档内比例映射到全局字号坐标系（正文≈全局字号，标题按比例放大）
 - 支持文本标签拆分 {{角色名:文本}} / {{手写:文本}} / {{打印:文本}}
 """
 
@@ -163,82 +164,151 @@ def _run_color(run) -> str | None:
 def _run_font_family(run, para=None) -> str | None:
     """读取 run 的字体 w:rFonts（优先 eastAsia > ascii > hAnsi），返回家族名或 None。
 
-    若 run 无直接指定，沿段落样式链回退；兼容同一 rPr 内多个 w:rFonts（Word 主题 + 自定义）。
+    若 run 无直接指定，沿段落直接格式与样式链回退；兼容同一 rPr 内多个 w:rFonts（Word 主题 + 自定义）。
     """
     def _from_rpr(rPr) -> str | None:
         if rPr is None:
             return None
-        # 可能存在多个 w:rFonts（主题 + 覆盖），取最后一个有效
         found = None
         for el in rPr.findall(qn("w:rFonts")):
             for attr in ("w:eastAsia", "w:ascii", "w:hAnsi", "w:cs"):
                 val = el.get(qn(attr))
                 if val and val.strip() and val.strip().lower() not in ("theme",):
-                    # 过滤主题占位，优先 eastAsia
                     if attr == "w:eastAsia":
                         return val.strip()
                     if found is None:
                         found = val.strip()
+            # 兼容 Word 主题字体属性 (majorEastAsia/minorEastAsia)
+            for attr in ("w:eastAsiaTheme", "w:asciiTheme", "w:hAnsiTheme", "w:cstheme"):
+                theme_val = el.get(qn(attr))
+                if theme_val and theme_val.strip():
+                    tv = theme_val.strip().lower()
+                    if "major" in tv:
+                        return "黑体"
+                    if "minor" in tv:
+                        return "仿宋"
         return found
 
-    rPr = run._element.rPr
+    # 1. run 直接格式 (w:rPr)
+    rPr = getattr(run, "_element", None)
+    if rPr is not None:
+        rPr = rPr.rPr
     fam = _from_rpr(rPr)
     if fam:
         return fam
+
+    # 2. python-docx run.font.name
+    try:
+        if run.font and run.font.name and run.font.name.strip():
+            return run.font.name.strip()
+    except Exception:
+        pass
+
+    # 3. 段落直接格式 (w:pPr -> w:rPr)
     if para is not None:
-        style = para.style
+        pPr = getattr(para._p, "pPr", None)
+        if pPr is not None:
+            p_rpr = pPr.find(qn("w:rPr"))
+            fam = _from_rpr(p_rpr)
+            if fam:
+                return fam
+
+        # 4. 段落样式链
+        style = getattr(para, "style", None)
         while style is not None:
+            try:
+                if style.font and style.font.name and style.font.name.strip():
+                    return style.font.name.strip()
+            except Exception:
+                pass
             sp = style.element.find(qn("w:rPr"))
             fam = _from_rpr(sp)
             if fam:
                 return fam
-            # 段落样式的 rPr 可能在 w:pPr/w:rPr 层？已覆盖 w:style/w:rPr
-            style = style.base_style
+            sp_p = style.element.find(qn("w:pPr"))
+            if sp_p is not None:
+                fam = _from_rpr(sp_p.find(qn("w:rPr")))
+                if fam:
+                    return fam
+            # 检查内置标题样式名
+            sname = (getattr(style, "name", "") or "").strip().lower()
+            sid = (getattr(style, "style_id", "") or "").strip().lower()
+            if any(sname.startswith(k) or sid.startswith(k) for k in ("heading", "title", "标题", "副标题", "一、", "二、")):
+                return "黑体"
+            style = getattr(style, "base_style", None)
+
     return None
 
 
 def _run_bold(run, para=None, doc=None) -> bool:
-    """读取 run 的加粗 w:b / w:bCs（考虑 val=false 显式关闭），沿样式链回退。"""
+    """读取 run 的加粗 w:b / w:bCs（考虑 val=false 显式关闭），沿段落格式与样式链回退。"""
     def _check_b(rPr) -> bool | None:
         if rPr is None:
             return None
         for tag in ("w:b", "w:bCs"):
-            el = rPr.find(qn(tag))
-            if el is not None:
+            for el in rPr.findall(qn(tag)):
                 val = el.get(qn("w:val"))
                 if val is None:
                     return True  # <w:b/> 无 val 视为 true
                 v = val.strip().lower()
-                if v in ("false", "0", "off"):
+                if v in ("false", "0", "off", "none"):
                     return False
                 if v in ("true", "1", "on"):
                     return True
                 return True
         return None
-    # run 直接
-    rPr = run._element.rPr
+
+    # 1. run 直接格式 (w:rPr)
+    rPr = getattr(run, "_element", None)
+    if rPr is not None:
+        rPr = rPr.rPr
     b = _check_b(rPr)
     if b is not None:
         return b
-    # 段落样式链
+
+    # 2. python-docx run.bold
+    try:
+        if run.bold is True or (run.font and run.font.bold is True):
+            return True
+        if run.bold is False or (run.font and run.font.bold is False):
+            return False
+    except Exception:
+        pass
+
+    # 3. 段落直接格式 (w:pPr -> w:rPr)
     if para is not None:
-        style = para.style
+        pPr = getattr(para._p, "pPr", None)
+        if pPr is not None:
+            b = _check_b(pPr.find(qn("w:rPr")))
+            if b is not None:
+                return b
+
+        # 4. 段落样式链
+        style = getattr(para, "style", None)
         while style is not None:
+            try:
+                if style.font and style.font.bold is True:
+                    return True
+                if style.font and style.font.bold is False:
+                    return False
+            except Exception:
+                pass
             sp = style.element.find(qn("w:rPr"))
             b = _check_b(sp)
             if b is not None:
                 return b
-            style = style.base_style
-        # run.font.bold 兜底（python-docx 已解析）
-        try:
-            if run.bold is True:
+            sp_p = style.element.find(qn("w:pPr"))
+            if sp_p is not None:
+                b = _check_b(sp_p.find(qn("w:rPr")))
+                if b is not None:
+                    return b
+            # 检查内置标题样式名
+            sname = (getattr(style, "name", "") or "").strip().lower()
+            sid = (getattr(style, "style_id", "") or "").strip().lower()
+            if any(sname.startswith(k) or sid.startswith(k) for k in ("heading", "title", "标题", "副标题", "一、", "二、")):
                 return True
-            if run.bold is False:
-                # 显式 false 也算，但可能被样式覆盖，已在上游处理
-                pass
-        except Exception:
-            pass
-    # docDefaults 一般不含加粗，默认不加粗
+            style = getattr(style, "base_style", None)
+
     return False
 
 
@@ -302,17 +372,33 @@ def _run_font_size_pt(run, para=None, doc=None) -> float | None:
     return None
 
 
-def _pt_to_px(pt: float) -> int:
-    """Word pt（1/72英寸）转像素（96 DPI），与 Pillow 逻辑一致。"""
-    return max(1, int(round(pt * 96.0 / 72.0)))
+def _doc_default_font_pt(doc) -> float:
+    """文档默认正文字号（pt）：Normal 样式 > docDefaults > 兜底 12。
+
+    用于把各 Run 的 Word 字号换算为相对比例（正文 ≈ 全局字号）。
+    """
+    try:
+        size = doc.styles["Normal"].font.size
+        if size:
+            return size.pt
+    except KeyError:
+        pass
+    el = doc.styles.element.find(qn("w:docDefaults"))
+    if el is not None:
+        el = el.find(qn("w:rPrDefault"))
+        if el is not None:
+            el = el.find(qn("w:rPr"))
+            if el is not None:
+                sz = el.find(qn("w:sz"))
+                if sz is not None:
+                    val = sz.get(qn("w:val"))
+                    if val:
+                        return int(val) / 2.0  # 半磅 -> pt
+    return 12.0
 
 
 def _split_by_tags(text: str) -> list[tuple[str, str | None]]:
-    """按 {{前缀:内容}} 切分文本，返回 [(片段, 标签前缀或None)]。
-
-    标签前缀白名单外也保留，以便动态分配角色名。
-    无标签时返回 [(text, None)]。
-    """
+    """按 {{前缀:内容}} 切分文本，返回 [(片段, 标签前缀或None)]。"""
     if not text or "{{" not in text:
         return [(text, None)] if text else []
     res: list[tuple[str, str | None]] = []
@@ -328,7 +414,6 @@ def _split_by_tags(text: str) -> list[tuple[str, str | None]]:
         last = end
     if last < len(text):
         res.append((text[last:], None))
-    # 过滤空片段
     return [(t, k) for t, k in res if t]
 
 
@@ -343,35 +428,111 @@ def _normalize_tag_key(key: str) -> str:
     return key.strip()
 
 
-def load_paragraphs(path: str | Path, font_size: int | None = None) -> list[Paragraph]:
-    """读取 docx 中每个段落，返回 [Paragraph]（忽略空段落）。
+_HEADING_PATTERNS = [
+    re.compile(r"^[一二三四五六七八九十百]+、"),          # 一、深化理论学习...
+    re.compile(r"^第[一二三四五六七八九十百\d]+[章节目条篇]"),  # 第一章、第一节...
+    re.compile(r"^[（\(][一二三四五六七八九十\d]+[）\)]"),    # （一）...
+    re.compile(r"^\d+[\.、]\s*\S+"),                     # 1. 1、...
+]
 
-    兼容旧接口：返回纯文本段落（text），不含 runs。
-    首行缩进优先按字符数（firstLineChars）× font_size 换算，
-    与 GUI“首行缩进”按钮（2×字体大小）的语义一致；
-    无字符数时回退 EMU（直接/样式继承）。
-    """
-    # 复用新实现后压缩为 plain
+
+def _is_chinese_heading(text: str, align: str = "left", is_first_para: bool = False) -> bool:
+    """智能判定中文文档中的标题段落（公文一级/二级标题、首行居中标题等）。"""
+    s = text.strip()
+    if not s:
+        return False
+    if len(s) > 60:
+        return False
+    if align == "center" and len(s) <= 30:
+        return True
+    if is_first_para and len(s) <= 20:
+        return True
+    for pat in _HEADING_PATTERNS:
+        if pat.match(s):
+            return True
+    return False
+
+
+# Word/WPS 标准高亮颜色名称到角色 ID 的精准语义映射（与 GUI _ROLE_BG 底色完全对应）
+_HIGHLIGHT_NAME_TO_ROLE_ID: dict[str, int] = {
+    "yellow": 2,          # 黄色底 (#fff8b8)
+    "darkyellow": 6,      # 橘黄底 (#ffe0b3)
+    "green": 3,           # 绿色底 (#d1ffd1)
+    "darkgreen": 3,       # 深绿底 (#d1ffd1)
+    "cyan": 4,            # 青色/天蓝底 (#c8e8ff)
+    "blue": 4,            # 蓝色底 (#c8e8ff)
+    "darkblue": 4,        # 深蓝底 (#c8e8ff)
+    "darkcyan": 4,        # 深青底 (#c8e8ff)
+    "turquoise": 4,       # 绿松石/天蓝 (#c8e8ff)
+    "magenta": 5,         # 品红底 (#ffd8f0)
+    "pink": 5,            # 粉红底 (#ffd8f0)
+    "red": 5,             # 红色底 (#ffd8f0)
+    "darkred": 5,         # 深红底 (#ffd8f0)
+    "darkmagenta": 7,     # 深品红/紫底 (#e0d8ff)
+    "purple": 7,          # 紫色底 (#e0d8ff)
+    "violet": 7,          # 紫罗兰底 (#e0d8ff)
+    "lightgray": 1,       # 印刷灰 (#e8e8e8)
+    "darkgray": 1,        # 印刷灰 (#e8e8e8)
+    "gray-25": 1,
+    "gray-50": 1,
+    "gray": 1,
+}
+
+
+def _hex_to_role_id(hex_str: str) -> int:
+    """根据 hex 底纹色彩特征匹配最接近的角色底色（2:黄, 3:绿, 4:蓝, 5:粉, 6:橘, 7:紫）。"""
+    s = hex_str.strip().lstrip("#")
+    if len(s) != 6:
+        return 2
+    try:
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+    except ValueError:
+        return 2
+    if abs(r - g) < 15 and abs(g - b) < 15:
+        return 1 if r < 230 else 0
+    if b > r + 30 and b > g - 20:
+        return 4
+    if g > r + 20 and g > b + 20:
+        return 3
+    if r > 180 and g > 140 and b < 140:
+        return 6 if g < 180 else 2
+    if r > b and r > g + 30:
+        return 5
+    if b > g and r > g:
+        return 7
+    return 2
+
+
+_ROLE_DEFAULT_NAMES: dict[int, str] = {
+    0: "默认手写",
+    1: "打印体",
+    2: "手写角色1 (黄)",
+    3: "手写角色2 (绿)",
+    4: "手写角色3 (蓝)",
+    5: "手写角色4 (粉)",
+    6: "手写角色5 (橘)",
+    7: "手写角色6 (紫)",
+}
+
+
+def load_paragraphs(path: str | Path, font_size: int | None = None) -> list[Paragraph]:
+    """读取 docx 中每个段落，返回 [Paragraph]（忽略空段落）。"""
     paras = load_paragraphs_with_runs(path, font_size=font_size)
-    # 向后兼容：保留 text，供旧调用方比较 plain_text
     return paras
 
 
 def load_paragraphs_with_runs(
     path: str | Path, font_size: int | None = None
 ) -> list[Paragraph]:
-    """读取 docx 返回带 TextRun 的段落列表（支持高亮动态映射与标签）。
-
-    动态映射规则（与用户预期一致）：
-      - 文档**整体无背景高亮** → 全文视为手写（无标记段落 role 0）
-      - 文档**存在任意背景高亮** → 有高亮片断为手写（按首现顺序分配 2,3…），
-        其余无标记文本视为打印体（role 1），实现“背景色之处手写、其余打印”的自然排版
-      - {{打印:...}} / {{打印体:...}} → role 1（打印体，最高优先级）
-      - 高亮颜色首次出现 → 分配 id=2，第二次出现 → id=3 … 颜色值不限定
-      - {{任意名:...}} 中任意名首次出现 → 分配下一可用 id（与高亮共享 id 池，文档顺序决定）
-    同一文档内相同高亮/相同标签名前缀始终映射到同一角色。
-    """
+    """读取 docx 返回带 TextRun 的段落列表（支持高亮精准颜色映射与标签）。"""
     doc = Document(str(path))
+    # 文档正文基准字号（pt）：Run 的 Word 字号按比例映射到全局字号坐标系，
+    # 正文 ≈ 用户设置字号，标题等按文档内比例放大/缩小。
+    # 不能换算成 96DPI 绝对像素：高分辨率背景（全局字号 100+）上会小成点。
+    body_pt = _doc_default_font_pt(doc) or 12.0
+    global_px = float(font_size) if font_size else None
     # 预扫描：文档级是否有任意高亮（决定无标记文本的默认去向）
     has_any_highlight = False
     for para in doc.paragraphs:
@@ -382,63 +543,90 @@ def load_paragraphs_with_runs(
         if has_any_highlight:
             break
     result: list[Paragraph] = []
-    # 动态 id 池：2 开始；已分配的 highlight/tag 映射
     highlight_to_role: dict[str, int] = {}
     tag_to_role: dict[str, int] = {}
+    used_role_ids: set[int] = {0, 1}
     next_role_id = 2
 
     def alloc_for_highlight(hl: str) -> int:
         nonlocal next_role_id
-        key = hl.lower()
-        if key not in highlight_to_role:
-            highlight_to_role[key] = next_role_id
+        key = hl.lower().strip()
+        if key in highlight_to_role:
+            return highlight_to_role[key]
+        if key in _HIGHLIGHT_NAME_TO_ROLE_ID:
+            rid = _HIGHLIGHT_NAME_TO_ROLE_ID[key]
+            highlight_to_role[key] = rid
+            used_role_ids.add(rid)
+            return rid
+        clean_hex = key.lstrip("#")
+        if len(clean_hex) == 6 and all(c in "0123456789abcdefABCDEF" for c in clean_hex):
+            rid = _hex_to_role_id(clean_hex)
+            highlight_to_role[key] = rid
+            used_role_ids.add(rid)
+            return rid
+        while next_role_id in used_role_ids:
             next_role_id += 1
-        return highlight_to_role[key]
+        rid = next_role_id
+        next_role_id += 1
+        highlight_to_role[key] = rid
+        used_role_ids.add(rid)
+        return rid
 
     def alloc_for_tag(tag_key: str) -> int:
         nonlocal next_role_id
         nk = _normalize_tag_key(tag_key)
-        # 固定映射优先
         if nk in _FIXED_TAG_TO_ROLE:
             return _FIXED_TAG_TO_ROLE[nk]
-        # 已分配的自定义标签
         if nk in tag_to_role:
             return tag_to_role[nk]
-        # “角色1/角色2” 解析：角色N -> id N+1 ？为了与动态对齐，显式 角色1→2 角色2→3
-        # 兼容：纯数字标签 "1" / "2"
         low = nk.lower()
         if low.startswith("角色"):
             suffix = low[2:].strip()
             try:
                 n = int(suffix)
-                # 角色1 -> 2, 角色2 -> 3
                 rid = n + 1
-                # 确保 next_role_id 推进到超过该 rid，避免与后续动态冲突
                 if rid >= next_role_id:
                     next_role_id = rid + 1
                 tag_to_role[nk] = rid
+                used_role_ids.add(rid)
                 return rid
             except ValueError:
                 pass
-        # 任意新名字动态分配
-        tag_to_role[nk] = next_role_id
+        while next_role_id in used_role_ids:
+            next_role_id += 1
+        rid = next_role_id
         next_role_id += 1
-        return tag_to_role[nk]
+        tag_to_role[nk] = rid
+        used_role_ids.add(rid)
+        return rid
 
-    for para in doc.paragraphs:
-        # 跳过完全空白段落（无文本且无高亮运行）
+    for idx, para in enumerate(doc.paragraphs):
         if not para.text.strip() and not any(r.text for r in para.runs):
             continue
         chars = _first_line_chars(para) or _first_line_emu_chars(para, doc)
         indent = int(round(chars * (font_size or 36))) if chars else 0
         align = _resolve_align(para)
-        # 若段落无 runs（极少），退化为单 run，并遵循文档级策略
+        is_heading_para = _is_chinese_heading(para.text, align=align, is_first_para=(idx == 0))
+
         if not para.runs:
             plain = para.text.strip()
             if not plain:
                 continue
             fallback_role = 1 if has_any_highlight else 0
-            result.append(Paragraph(text=plain, align=align, first_line_indent=indent, runs=[TextRun(text=plain, role_id=fallback_role)]))
+            fam = "黑体" if is_heading_para else "仿宋"
+            ffile = None
+            try:
+                p = family_to_file(fam)
+                if p and Path(p).is_file():
+                    ffile = str(p)
+            except Exception:
+                pass
+            result.append(Paragraph(
+                text=plain,
+                align=align,
+                first_line_indent=indent,
+                runs=[TextRun(text=plain, role_id=fallback_role, font_family=fam, font_file=ffile, bold=is_heading_para)],
+            ))
             continue
 
         runs: list[TextRun] = []
@@ -448,10 +636,18 @@ def load_paragraphs_with_runs(
                 continue
             hl = _run_highlight(run)
             col = _run_color(run)
-            # 预取该 run 的字体信息（仅打印体时沿用）；回退到段落/文档样式
             fam = _run_font_family(run, para)
+            is_bold = _run_bold(run, para, doc) or is_heading_para
+            if is_bold or is_heading_para:
+                if not fam or fam.strip().lower() in ("仿宋", "仿宋_gb2312", "fangsong", "simfang", "宋体", "simsun"):
+                    fam = "黑体"
+            elif not fam:
+                fam = "仿宋"
             pt = _run_font_size_pt(run, para, doc)
-            fpx = _pt_to_px(pt) if pt is not None else None
+            if pt is not None and global_px:
+                fpx = max(1, int(round(pt / body_pt * global_px)))
+            else:
+                fpx = None
             ffile = None
             if fam:
                 try:
@@ -460,31 +656,24 @@ def load_paragraphs_with_runs(
                         ffile = str(p)
                 except Exception:
                     ffile = None
-            is_bold = _run_bold(run, para, doc)
-            # 标签切分：run 文本内可能含多个 {{k:v}}
             segments = _split_by_tags(raw)
             if not segments:
                 continue
             def _font_kwargs_for(role_id: int) -> dict:
-                # 仅打印体（role 1 或 printed）沿用原文系统字体与加粗；手写体固定用用户手写字体，忽略原文
                 if role_id == 1:
                     return dict(font_family=fam, font_size=fpx, font_file=ffile, bold=is_bold)
                 return dict(font_family=None, font_size=None, font_file=None, bold=False)
 
-            # 若无标签，直接按高亮/全局策略映射
             if len(segments) == 1 and segments[0][1] is None:
                 text, _ = segments[0]
                 if hl is None:
-                    # 全局无高亮 → 默认手写；有高亮 → 无标记视为打印
                     role = 1 if has_any_highlight else 0
                 else:
                     role = alloc_for_highlight(hl)
                 runs.append(TextRun(text=text, role_id=role, color=col, **_font_kwargs_for(role)))
             else:
-                # 含标签：每段按标签前缀分配，高亮仅对非标签片段生效
                 for seg_text, seg_key in segments:
                     if seg_key is None:
-                        # 非标签片段跟随 run 的高亮，并结合文档级策略
                         if hl is None:
                             role = 1 if has_any_highlight else 0
                         else:
@@ -492,11 +681,9 @@ def load_paragraphs_with_runs(
                         runs.append(TextRun(text=seg_text, role_id=role, color=col, **_font_kwargs_for(role)))
                     else:
                         role = alloc_for_tag(seg_key)
-                        # 标签内容的颜色仍跟随 run 的 w:color（若有）；字体仅在打印标签时沿用
                         runs.append(TextRun(text=seg_text, role_id=role, color=col, **_font_kwargs_for(role)))
         if not runs:
             continue
-        # 合并相邻同 role+color+font+bold 的 Run，压缩列表
         merged: list[TextRun] = []
         for r in runs:
             if merged and merged[-1].role_id == r.role_id and merged[-1].color == r.color \
@@ -505,7 +692,6 @@ def load_paragraphs_with_runs(
                 merged[-1].text += r.text
             else:
                 merged.append(r)
-        # 纯文本回落（兼容旧段落 text 字段）
         plain = "".join(r.text for r in merged)
         if not plain.strip():
             continue
@@ -522,13 +708,7 @@ def extract_roles_from_paragraphs(paragraphs: list[Paragraph]) -> list[Handwriti
     for p in paragraphs:
         for r in p.runs or []:
             if r.role_id not in seen:
-                if r.role_id == 0:
-                    seen[r.role_id] = "默认手写"
-                elif r.role_id == 1:
-                    seen[r.role_id] = "打印体"
-                else:
-                    seen[r.role_id] = f"手写角色{r.role_id-1}"
-    # 按 id 排序返回
+                seen[r.role_id] = _ROLE_DEFAULT_NAMES.get(r.role_id, f"手写角色{r.role_id-1}")
     roles = []
     for rid in sorted(seen):
         roles.append(HandwritingRole(id=rid, name=seen[rid], printed=(rid == 1)))

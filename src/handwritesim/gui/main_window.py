@@ -24,7 +24,7 @@ from .. import __version__
 from ..core.models import HandwritingParams, Paragraph, TextRegion, TextRun, HandwritingRole, default_roles
 from ..core import doc_render
 from ..core import presets
-from ..core.docx_io import load_paragraphs_with_runs, extract_roles_from_paragraphs
+from ..core.docx_io import load_paragraphs_with_runs, extract_roles_from_paragraphs, _is_chinese_heading
 from .role_manager import RoleManagerDialog, role_background
 from ..core.paths import assets_root, ensure_assets_dirs
 from ..core.updater import (
@@ -245,7 +245,16 @@ class MainWindow(QMainWindow):
             self._preview_timer.start()
 
     # 划选标记与高亮预览
-    _ROLE_BG = {0: None, 1: QtGui.QColor("#e8e8e8"), 2: QtGui.QColor("#fff8b8"), 3: QtGui.QColor("#d1ffd1"), 4: QtGui.QColor("#c8e8ff")}
+    _ROLE_BG = {
+        0: None,
+        1: QtGui.QColor("#e8e8e8"),
+        2: QtGui.QColor("#fff8b8"),
+        3: QtGui.QColor("#d1ffd1"),
+        4: QtGui.QColor("#c8e8ff"),
+        5: QtGui.QColor("#ffd8f0"),
+        6: QtGui.QColor("#ffe0b3"),
+        7: QtGui.QColor("#e0d8ff"),
+    }
     def _role_bg(self, rid: int) -> QtGui.QColor | None:
         if rid in self._ROLE_BG:
             return self._ROLE_BG[rid]
@@ -388,6 +397,9 @@ class MainWindow(QMainWindow):
                         cfmt.setProperty(QTextCharFormat.Property.UserProperty + 4, True)
                         # 编辑器内直观加粗预览（仅打印体）
                         cfmt.setFontWeight(QtGui.QFont.Weight.Bold)
+                        f = cfmt.font()
+                        f.setBold(True)
+                        cfmt.setFont(f)
                     cursor.setCharFormat(cfmt)
                     cursor.insertText(run.text)
             else:
@@ -918,12 +930,25 @@ class MainWindow(QMainWindow):
                             is_bold = bool(bold_val)
                         else:
                             try:
-                                is_bold = cf.fontWeight() >= QtGui.QFont.Weight.Bold
+                                is_bold = (cf.fontWeight() >= QtGui.QFont.Weight.Bold) or cf.font().bold()
                             except Exception:
                                 is_bold = False
                         # 仅打印体保留加粗，手写体忽略原文加粗
                         if rid != 1:
                             is_bold = False
+                        is_heading_block = _is_chinese_heading(raw, align=align, is_first_para=(i == 0))
+                        if is_heading_block and rid == 1:
+                            is_bold = True
+                            if not fam:
+                                fam = "黑体"
+                            if not ffile:
+                                try:
+                                    from ..core.system_fonts import family_to_file as _ftf
+                                    p = _ftf(fam)
+                                    if p and Path(p).is_file():
+                                        ffile = str(p)
+                                except Exception:
+                                    pass
                         # 合并连续同 role+字体+加粗 的片段
                         if runs and runs[-1].role_id == rid and runs[-1].font_family == fam and runs[-1].font_size == fsize and runs[-1].font_file == ffile and getattr(runs[-1], "bold", False) == is_bold:
                             runs[-1].text += text
@@ -1163,6 +1188,23 @@ class MainWindow(QMainWindow):
         "perturb_x_sigma", "perturb_y_sigma",
     )
 
+    @staticmethod
+    def _scaled_run(r: TextRun, scale: float) -> TextRun:
+        """预览降采样时重建 Run：保留字体/加粗/颜色，仅字号按比例缩放。
+
+        字段丢失会让预览中 docx 导入的加粗与黑体/宋体/仿宋混排
+        全部回落到打印角色默认字体（导出不受影响，仅预览失真）。
+        """
+        return TextRun(
+            text=r.text,
+            role_id=r.role_id,
+            color=r.color,
+            font_family=r.font_family,
+            font_size=max(1, round(r.font_size * scale)) if r.font_size else None,
+            font_file=r.font_file,
+            bold=r.bold,
+        )
+
     def _downsample_preview(self, params: HandwritingParams) -> HandwritingParams:
         """预览时若背景过大则降采样并按比例缩放参数，保证实时性。
 
@@ -1221,7 +1263,7 @@ class MainWindow(QMainWindow):
             for p in params.paragraphs:
                 runs = None
                 if p.runs:
-                    runs = [TextRun(text=r.text, role_id=r.role_id, color=r.color) for r in p.runs]
+                    runs = [self._scaled_run(r, scale) for r in p.runs]
                 preview.paragraphs.append(
                     Paragraph(
                         text=p.text,
@@ -1239,7 +1281,7 @@ class MainWindow(QMainWindow):
                 for p in r.paragraphs:
                     runs = None
                     if p.runs:
-                        runs = [TextRun(text=rr.text, role_id=rr.role_id, color=rr.color) for rr in p.runs]
+                        runs = [self._scaled_run(rr, scale) for rr in p.runs]
                     scaled_paras.append(Paragraph(text=p.text, align=p.align, first_line_indent=p.first_line_indent * scale, runs=runs))
             preview.regions.append(
                 TextRegion(

@@ -10,6 +10,9 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from .resources import resource_path
 
+_ARROW_LIGHT = resource_path("ui", "arrow_down.svg").replace("\\", "/")
+_ARROW_DARK = resource_path("ui", "arrow_down_dark.svg").replace("\\", "/")
+
 _LIGHT_QSS = """
 QMainWindow, QDialog, QMessageBox {
     background: #f4f7f4;
@@ -63,7 +66,7 @@ QComboBox {
     background: #ffffff;
     border: 1px solid #c9d6cd;
     border-radius: 4px;
-    padding: 2px 6px;
+    padding: 2px 24px 2px 6px;
     color: #2b3430;
 }
 QComboBox:focus {
@@ -75,12 +78,22 @@ QComboBox::drop-down {
     width: 20px;
     border-left: 1px solid #c9d6cd;
 }
+QComboBox::down-arrow {
+    image: url("__ARROW_DOWN_SVG__");
+    width: 12px;
+    height: 12px;
+}
 QComboBox QAbstractItemView {
     background: #ffffff;
     border: 1px solid #c9d6cd;
     selection-background-color: #9ddc80;
     selection-color: #2b3430;
     color: #2b3430;
+    padding: 2px;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 22px;
+    padding: 2px 4px;
 }
 QListWidget {
     background: #ffffff;
@@ -222,7 +235,7 @@ QProgressBar::chunk {
     background: #9ddc80;
     border-radius: 3px;
 }
-"""
+""".replace("__ARROW_DOWN_SVG__", _ARROW_LIGHT)
 
 _DARK_QSS = """
 QMainWindow, QDialog, QMessageBox {
@@ -277,7 +290,7 @@ QComboBox {
     background: #232b26;
     border: 1px solid #38453d;
     border-radius: 4px;
-    padding: 2px 6px;
+    padding: 2px 24px 2px 6px;
     color: #e8f0eb;
 }
 QComboBox:focus {
@@ -289,12 +302,22 @@ QComboBox::drop-down {
     width: 20px;
     border-left: 1px solid #38453d;
 }
+QComboBox::down-arrow {
+    image: url("__ARROW_DOWN_DARK_SVG__");
+    width: 12px;
+    height: 12px;
+}
 QComboBox QAbstractItemView {
     background: #232b26;
     border: 1px solid #38453d;
     selection-background-color: #3d6e35;
     selection-color: #ffffff;
     color: #e8f0eb;
+    padding: 2px;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 22px;
+    padding: 2px 4px;
 }
 QListWidget {
     background: #232b26;
@@ -439,7 +462,7 @@ QProgressBar::chunk {
     background: #3f7e34;
     border-radius: 3px;
 }
-"""
+""".replace("__ARROW_DOWN_DARK_SVG__", _ARROW_DARK)
 
 
 def is_dark_mode() -> bool:
@@ -498,6 +521,10 @@ class NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
 
 class NoWheelComboBox(QtWidgets.QComboBox):
     """禁用鼠标滚轮切换的下拉框，避免滚动面板时误切换选项。"""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setView(QtWidgets.QListView(self))
 
     def wheelEvent(self, event) -> None:
         event.ignore()

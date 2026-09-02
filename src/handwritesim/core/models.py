@@ -59,7 +59,7 @@ class TextRun:
     role_id: int = 0             # 指向 HandwritingParams.roles 的 id
     color: str | None = None     # 可选：直接 #RRGGBB 覆盖（来自 w:color），None=跟随角色/全局
     font_family: str | None = None  # 来自 docx w:rFonts（如 宋体/微软雅黑），打印体时有效
-    font_size: int | None = None    # 像素字号（由 w:sz half-pt 换算），打印体时有效；None=跟随角色/全局
+    font_size: int | None = None    # 字号（与全局字号同坐标系：docx 按文档内比例映射），打印体时有效；None=跟随角色/全局
     font_file: str | None = None    # 若能解析到系统字体文件，存绝对路径；否则保留 family 供后续让用户自选
     bold: bool = False              # 来自 w:b / w:bCs，打印体加粗（手写体忽略）
 
