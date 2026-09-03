@@ -33,6 +33,8 @@ class RegionDialog(QtWidgets.QDialog):
         align: str = "left",
         indent_em: float = 0.0,
         paragraphs: list[Paragraph] | None = None,
+        roles: list | None = None,
+        role_id: int | None = None,
         word_spacing: int | None = None,
         line_spacing: int | None = None,
         font_size_sigma: int | None = None,
@@ -129,18 +131,40 @@ class RegionDialog(QtWidgets.QDialog):
         grid_basic.setVerticalSpacing(6)
         grid_basic.setColumnStretch(1, 1)
 
+        # 绑定角色（对齐 Rust 版 RegionDialog：区域继承所选角色的字体/颜色/扰动）
+        self._roles = list(roles or [])
+        grid_basic.addWidget(QtWidgets.QLabel("绑定角色", scroll_content), 0, 0)
+        row_role = QtWidgets.QHBoxLayout()
+        self.combo_role = NoWheelComboBox(scroll_content)
+        if self._roles:
+            for role in sorted(self._roles, key=lambda r: r.id):
+                self.combo_role.addItem(role.name, int(role.id))
+        else:
+            self.combo_role.addItem("手写体（默认）", 0)
+            self.combo_role.addItem("打印体", 1)
+        self.combo_role.setToolTip(
+            "区域将继承所选角色的字体、墨水颜色与扰动设置；"
+            "在「笔迹角色管理」中修改角色会自动同步到所有绑定区域"
+        )
+        init_role = int(role_id) if role_id is not None else (1 if printed else 0)
+        idx = self.combo_role.findData(init_role)
+        self.combo_role.setCurrentIndex(max(idx, 0))
+        row_role.addWidget(self.combo_role)
+        row_role.addStretch(1)
+        grid_basic.addLayout(row_role, 0, 1)
+
         # 样式
-        grid_basic.addWidget(QtWidgets.QLabel("样式", scroll_content), 0, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("样式", scroll_content), 1, 0)
         row_style = QtWidgets.QHBoxLayout()
         self.combo_style = NoWheelComboBox(scroll_content)
         self.combo_style.addItems(["手写体", "打印体"])
         self.combo_style.setCurrentIndex(1 if printed else 0)
         row_style.addWidget(self.combo_style)
         row_style.addStretch(1)
-        grid_basic.addLayout(row_style, 0, 1)
+        grid_basic.addLayout(row_style, 1, 1)
 
         # 所在页
-        grid_basic.addWidget(QtWidgets.QLabel("所在页", scroll_content), 1, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("所在页", scroll_content), 2, 0)
         row_page = QtWidgets.QHBoxLayout()
         self.spin_page = NoWheelSpinBox(scroll_content)
         self.spin_page.setRange(1, 999)
@@ -151,11 +175,11 @@ class RegionDialog(QtWidgets.QDialog):
         lbl_page_hint.setProperty("hint", True)
         lbl_page_hint.setWordWrap(True)
         row_page.addWidget(lbl_page_hint, 1)
-        grid_basic.addLayout(row_page, 1, 1)
+        grid_basic.addLayout(row_page, 2, 1)
 
         # 打印字体
         self.label_font = QtWidgets.QLabel("打印字体", scroll_content)
-        grid_basic.addWidget(self.label_font, 2, 0)
+        grid_basic.addWidget(self.label_font, 3, 0)
         row_font = QtWidgets.QHBoxLayout()
         self.edit_font = QtWidgets.QLineEdit(scroll_content)
         self.edit_font.setPlaceholderText("留空使用主字体")
@@ -163,10 +187,10 @@ class RegionDialog(QtWidgets.QDialog):
         row_font.addWidget(self.edit_font, 1)
         self.btn_font = QtWidgets.QPushButton("选择", scroll_content)
         row_font.addWidget(self.btn_font)
-        grid_basic.addLayout(row_font, 2, 1)
+        grid_basic.addLayout(row_font, 3, 1)
 
         # 字号
-        grid_basic.addWidget(QtWidgets.QLabel("字号", scroll_content), 3, 0)
+        grid_basic.addWidget(QtWidgets.QLabel("字号", scroll_content), 4, 0)
         row_size = QtWidgets.QHBoxLayout()
         self.spin_size = NoWheelSpinBox(scroll_content)
         self.spin_size.setRange(0, 300)
@@ -178,7 +202,7 @@ class RegionDialog(QtWidgets.QDialog):
         lbl_size_hint.setProperty("hint", True)
         lbl_size_hint.setWordWrap(True)
         row_size.addWidget(lbl_size_hint, 1)
-        grid_basic.addLayout(row_size, 3, 1)
+        grid_basic.addLayout(row_size, 4, 1)
 
         v.addLayout(grid_basic)
 
@@ -393,6 +417,8 @@ class RegionDialog(QtWidgets.QDialog):
         # --------------------------------------------------------------
         self.btn_font.clicked.connect(self._choose_font)
         self.combo_style.currentIndexChanged.connect(self._update_font_enabled)
+        self.combo_role.currentIndexChanged.connect(self._on_role_changed)
+        self.combo_style.currentIndexChanged.connect(self._on_style_changed)
         self.btn_align_left.clicked.connect(lambda: self._set_align("left"))
         self.btn_align_center.clicked.connect(lambda: self._set_align("center"))
         self.btn_align_right.clicked.connect(lambda: self._set_align("right"))
@@ -477,6 +503,30 @@ class RegionDialog(QtWidgets.QDialog):
         self.label_font.setEnabled(printed)
         self.edit_font.setEnabled(printed)
         self.btn_font.setEnabled(printed)
+
+    def _on_role_changed(self) -> None:
+        """切换绑定角色：样式（手写/打印）跟随角色打印体标记。"""
+        rid = self.combo_role.currentData()
+        role = next((r for r in self._roles if int(r.id) == int(rid)), None)
+        if role is None:
+            return
+        self.combo_style.blockSignals(True)
+        self.combo_style.setCurrentIndex(1 if role.printed or role.id == 1 else 0)
+        self.combo_style.blockSignals(False)
+        self._update_font_enabled()
+
+    def _on_style_changed(self) -> None:
+        """切换手写/打印样式：默认角色（0/1）联动跟随；显式绑定角色时保留。"""
+        printed = self.combo_style.currentIndex() == 1
+        rid = self.combo_role.currentData()
+        if printed and rid == 0:
+            idx = self.combo_role.findData(1)
+            if idx >= 0:
+                self.combo_role.setCurrentIndex(idx)
+        elif not printed and rid == 1:
+            idx = self.combo_role.findData(0)
+            if idx >= 0:
+                self.combo_role.setCurrentIndex(idx)
 
     def _choose_font(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -630,6 +680,11 @@ class RegionDialog(QtWidgets.QDialog):
     @property
     def region_text(self) -> str:
         return self.text_edit.toPlainText()
+
+    @property
+    def region_role_id(self) -> int:
+        data = self.combo_role.currentData()
+        return int(data) if data is not None else 0
 
     @property
     def region_printed(self) -> bool:

@@ -293,7 +293,15 @@ def _layout_text(
         return font_cache[size]
 
     i = start
-    y = top + line_spacing - font_size
+    if force_first_line:
+        # 区域路径：首行紧贴区域顶部；矮单行区域（放不下 1.8 行）且无边距时
+        # 垂直居中。避免继承整页行距把首字推出框外（对齐 Rust layout.rs）。
+        if height > font_size * 1.8 or top > 0:
+            y = top
+        else:
+            y = max((height - font_size) / 2.0, 0)
+    else:
+        y = top + line_spacing - font_size
     first_line = True
     while y <= height - bottom - font_size or (force_first_line and first_line):
         first_line = False
@@ -1115,7 +1123,11 @@ class FastEngine:
     def _region_params(
         self, params: HandwritingParams, region: TextRegion
     ) -> HandwritingParams:
-        """构造区域局部的渲染参数：独立字体/字号；排版/扰动/错字/颜色覆盖项；打印体关闭全部扰动。"""
+        """构造区域局部的渲染参数：独立字体/字号；排版/扰动/错字/颜色覆盖项。
+
+        支持继承关联的 HandwritingRole 属性（region.role_id 匹配）；
+        打印体（角色或区域任一）关闭全部扰动（打印语义始终占优）。
+        """
         rp = copy.copy(params)
         rp.text = region.text
         rp.paragraphs = None
@@ -1125,10 +1137,57 @@ class FastEngine:
         rp.right_margin = region.margin_right or 0
         rp.top_margin = region.margin_top or 0
         rp.bottom_margin = region.margin_bottom or 0
+
+        is_printed = region.printed
+
+        # 1. 继承 HandwritingRole（匹配 region.role_id；0 = 默认手写不继承）
+        role = next(
+            (r for r in params.effective_roles() if r.id == region.role_id and r.id != 0),
+            None,
+        )
+        if role is not None:
+            if role.font_path and not region.font_path:
+                rp.font_path = role.font_path
+            if role.color and region.color is None:
+                rp.color = role.color
+            if role.printed or role.id == 1:
+                is_printed = True
+            if role.font_size > 0 and region.font_size == 0:
+                rp.font_size = role.font_size
+            if role.word_spacing is not None and region.word_spacing is None:
+                rp.word_spacing = role.word_spacing
+            if role.font_size_sigma is not None and region.font_size_sigma is None:
+                rp.font_size_sigma = role.font_size_sigma
+            if role.word_spacing_sigma is not None and region.word_spacing_sigma is None:
+                rp.word_spacing_sigma = role.word_spacing_sigma
+            if role.line_spacing_sigma is not None and region.line_spacing_sigma is None:
+                rp.line_spacing_sigma = role.line_spacing_sigma
+            if role.perturb_x_sigma is not None and region.perturb_x_sigma is None:
+                rp.perturb_x_sigma = role.perturb_x_sigma
+            if role.perturb_y_sigma is not None and region.perturb_y_sigma is None:
+                rp.perturb_y_sigma = role.perturb_y_sigma
+            if role.perturb_theta_sigma is not None and region.perturb_theta_sigma is None:
+                rp.perturb_theta_sigma = role.perturb_theta_sigma
+
+        # 2. 区域级显式覆盖项
         if region.font_path:
             rp.font_path = region.font_path
         if region.font_size > 0:
             rp.font_size = region.font_size
+
+        # 行间距处理（对齐 Rust 版）：
+        # - 区域显式指定则优先；
+        # - 其次继承关联角色的行间距；
+        # - 多行区域（h > 字号×2）自动设置自然行间距（字号×0.35）；
+        # - 单行区域行间距为 0（避免继承整页预设的大行距把字推出框外）。
+        if region.line_spacing is not None:
+            rp.line_spacing = region.line_spacing
+        elif role is not None and role.line_spacing is not None:
+            rp.line_spacing = role.line_spacing
+        elif region.h > rp.font_size * 2.0:
+            rp.line_spacing = round(rp.font_size * 0.35)
+        else:
+            rp.line_spacing = 0
 
         # 段落 / 对齐 / 首行缩进：
         if region.paragraphs:
@@ -1176,8 +1235,8 @@ class FastEngine:
         if region.color is not None:
             rp.color = region.color
 
-        # 打印体：零扰动、零错字（优先于任何覆盖项）
-        if region.printed:
+        # 打印体（区域自身或关联角色任一）：零扰动、零错字（优先于任何覆盖项）
+        if is_printed:
             rp.word_spacing_sigma = 0
             rp.line_spacing_sigma = 0
             rp.font_size_sigma = 0
@@ -1185,6 +1244,35 @@ class FastEngine:
             rp.perturb_y_sigma = 0
             rp.perturb_theta_sigma = 0.0
             rp.miswrite_rate = 0.0
+
+        # 噪声类参数按区域字号相对主字号的比例缩放（对齐 Rust 版）：sigma 是
+        # 绝对像素值，在主文字字号下调出来的数值直接套到小字号区域（如 PDF
+        # 识别出的填空位）会相对放大数倍，视觉上字被"摇散"。
+        # 均值类（字间距/行距）与旋转（弧度量）保持原值不缩放。
+        k = rp.font_size / max(params.font_size, 1.0)
+        if abs(k - 1.0) > 1e-3:
+            rp.word_spacing_sigma *= k
+            rp.line_spacing_sigma *= k
+            rp.font_size_sigma *= k
+            rp.perturb_x_sigma *= k
+            rp.perturb_y_sigma *= k
+
+        # 行距按盒高收敛（对齐 Rust 版）：多行区域（带换行的提取文本）若按
+        # 检测行距放不下，会把末尾行挤出盒外被裁掉。估计行数需计入行内换行
+        # 余量（逐行 ceil），以"每行均分盒高"为上限收紧行距，
+        # 保证内容完整优先于行距还原。
+        split_lines = region.text.split("\n")
+        if len(split_lines) >= 2:
+            char_budget = max(
+                math.floor((region.w - rp.left_margin - rp.right_margin) / rp.font_size * 0.95),
+                1.0,
+            )
+            est_lines = sum(
+                max(math.ceil(len(line) / char_budget), 1) for line in split_lines
+            )
+            ls_fit = region.h / est_lines - rp.font_size
+            if ls_fit > 0 and rp.line_spacing > ls_fit:
+                rp.line_spacing = ls_fit
         return rp
 
     def _is_mixed(self, params: HandwritingParams) -> bool:
@@ -1262,31 +1350,33 @@ class FastEngine:
             # 保证相同 seed 下预览与导出的逐字扰动完全一致
             rand = random.Random(f"{self._seed}|region{index}")
 
-            # 区域排版：仅排版在所属单页内（超出直接截断）
-            # 区域目前保持 plain 渲染（区域内如需混排，可通过 region.paragraphs 的 runs 走 mixed 分页）
+            # 区域排版：仅排版在所属单页内（超出框选区域的内容直接截断不跨页延伸）。
+            # 排版画布高度给足 4 倍盒高（对齐 Rust 版），避免"最后一行放不下被
+            # 分到下一页"而被 next() 整行丢弃——越界墨迹最终在合成时裁剪回盒高。
+            layout_h = rh * 4
             if rp.paragraphs:
                 # 检测区域段落是否混排
                 mixed = any(p.runs is not None and len(p.runs) > 1 for p in rp.paragraphs or [])
                 if mixed:
-                    masks_mixed = list(self._paragraph_page_masks_mixed(rp, rw, rh, rand=rand))
+                    masks_mixed = list(self._paragraph_page_masks_mixed(rp, rw, layout_h, rand=rand))
                     # 区域仅取首页的 colored dict，转换为 union mask for region entry? 但需分色渲染，改为特殊处理：单页 dict
                     # 为兼容 entries 的单 mask 结构，区域混排时直接取 union
                     mm = masks_mixed[0] if masks_mixed else {}
-                    if isinstance(mm, dict):
+                    if isinstance(mm, dict) and mm:
                         # 合并为单 bool union（仅用于区域模式的简单贴合，颜色信息暂丢失）
                         # 若需保留分色，需重构 entries 为 dict，但此为罕见路径（区域内再混排），先 union
-                        union = np.zeros((rh, rw), dtype=bool)
+                        union = None
                         for v in mm.values():
-                            union |= v
+                            union = v.copy() if union is None else (union | v)
                         mask = union
                     else:
-                        mask = mm
+                        mask = np.zeros((layout_h, rw), dtype=bool)
                 else:
-                    masks = list(self._paragraph_page_masks(rp, rw, rh, rand=rand))
-                    mask = masks[0] if masks else np.zeros((rh, rw), dtype=bool)
+                    masks = list(self._paragraph_page_masks(rp, rw, layout_h, rand=rand))
+                    mask = masks[0] if masks else np.zeros((layout_h, rw), dtype=bool)
             else:
                 mask, _ = _layout_text(
-                    rp, rand, region.text, 0, rw, rh, force_first_line=True
+                    rp, rand, region.text, 0, rw, layout_h, force_first_line=True
                 )
             target_page = max(1, int(region.page)) - 1
             entries.append((rp, ox, oy, rw, rh, mask, target_page))
@@ -1304,7 +1394,12 @@ class FastEngine:
                 if page_index != target_page or not mask.any():
                     continue
                 ys, xs = _perturbed_positions(mask, rp, self._rng)
-                canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
+                # 排版画布给了 4 倍盒高：把墨迹裁剪回区域框内（对齐 Rust 版
+                # to_combined_mask 的盒高裁剪语义）
+                keep = ys < rh
+                ys, xs = ys[keep], xs[keep]
+                if ys.size:
+                    canvas[oy + ys, ox + xs] = np.array(rp.fill, dtype=np.uint8)
             if page_index < len(main_masks):
                 mm = main_masks[page_index]
                 if isinstance(mm, dict):

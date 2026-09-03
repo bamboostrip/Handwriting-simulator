@@ -39,15 +39,33 @@ def _near_black_mask(image: Image.Image, limit: int = 60) -> np.ndarray:
 
 
 def test_pdf_to_page_images(tmp_path) -> None:
-    """PDF 应按页序栅格化为多张 PNG。"""
-    pdf = _make_pdf(tmp_path, [(255, 0, 0), (0, 0, 255)])
+    """PDF 应按页序栅格化为多张 PNG。
+
+    注意：高饱和度的纯色整页会被自动区域识别当作「整页高亮」擦白，
+    因此这里用黑色内容块（非高亮像素）验证页序与栅格化保真。
+    """
+    # 两页白底源图，各叠一个黑色内容块：第 1 页顶部、第 2 页底部
+    src0 = np.asarray(_flat_image((255, 255, 255)).convert("RGB")).copy()
+    src0[10:40, 10:60] = (0, 0, 0)
+    Image.fromarray(src0).save(tmp_path / "s0.png")
+    src1 = np.asarray(_flat_image((255, 255, 255)).convert("RGB")).copy()
+    src1[-40:-10, 10:60] = (0, 0, 0)
+    Image.fromarray(src1).save(tmp_path / "s1.png")
+    import img2pdf
+
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(img2pdf.convert([str(tmp_path / "s0.png"), str(tmp_path / "s1.png")]))
+
     pages = document_to_page_images(pdf, tmp_path / "out", dpi=72)
     assert len(pages) == 2
     first = np.asarray(Image.open(pages[0]).convert("RGB")).astype(np.int16)
     second = np.asarray(Image.open(pages[1]).convert("RGB")).astype(np.int16)
-    # 第一页偏红、第二页偏蓝（允许栅格化带来的少量偏差）
-    assert first[..., 0].mean() > 200 and first[..., 2].mean() < 80
-    assert second[..., 2].mean() > 200 and second[..., 0].mean() < 80
+    # 第 1 页黑色块在顶部、第 2 页在底部（页序正确且内容未被当作高亮擦除）
+    dark0 = np.all(first < 80, axis=-1)
+    dark1 = np.all(second < 80, axis=-1)
+    assert dark0.any() and dark1.any()
+    assert dark0.any(axis=1).argmax() < first.shape[0] // 2
+    assert dark1.any(axis=1).argmax() > second.shape[0] // 2
 
 
 def test_unsupported_document_type(tmp_path) -> None:

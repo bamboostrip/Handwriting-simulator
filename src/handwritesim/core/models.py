@@ -38,10 +38,13 @@ class HandwritingRole:
 
     id: int = 0
     name: str = ""
+    highlight: str | None = None   # 绑定的高亮颜色名（如 "yellow"；文档导入时自动关联角色用）
     font_path: str = ""          # 空 = 跟随主字体
     font_size: int = 0           # 0 = 跟随主字号
     color: str | None = None     # None = 跟随主颜色；#RRGGBB
     printed: bool = False        # True = 打印体，强制零扰动、零错字
+    word_spacing: int | None = None   # 字水平间距（None = 跟随全局）
+    line_spacing: int | None = None   # 行间距（None = 跟随全局）
     # 可选扰动覆盖（None = 跟随全局）
     font_size_sigma: int | None = None
     word_spacing_sigma: int | None = None
@@ -109,6 +112,8 @@ class TextRegion:
     w: int = 0                   # 区域宽
     h: int = 0                   # 区域高
     text: str = ""               # 区域内文字
+    role_id: int = 0             # 绑定的角色 ID（0 默认手写 / 1 打印体 / >=2 手写角色）
+    highlight: str | None = None  # 来源高亮颜色名（PDF/DOCX 底图自动识别时记录，如 "yellow"）
     font_path: str = ""          # 区域独立字体；空 = 使用主字体
     printed: bool = False        # True = 打印体（零扰动、规整排版）
     font_size: int = 0           # 区域字号；0 = 跟随主设置

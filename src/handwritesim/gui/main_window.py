@@ -203,6 +203,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._roles.append(dlg.result_role)
             self._refresh_role_list()
+            self._refresh_region_list()
             self._preview_timer.start()
 
     def _role_edit(self) -> None:
@@ -223,6 +224,7 @@ class MainWindow(QMainWindow):
                     self._roles[i] = nr
                     break
             self._refresh_role_list()
+            self._refresh_region_list()
             self._preview_timer.start()
 
     def _role_del(self) -> None:
@@ -235,6 +237,7 @@ class MainWindow(QMainWindow):
             return
         self._roles = [r for r in self._roles if r.id != rid]
         self._refresh_role_list()
+        self._refresh_region_list()
         self._preview_timer.start()
 
     def _role_manage(self) -> None:
@@ -242,6 +245,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             self._roles = dlg.result_roles
             self._refresh_role_list()
+            self._refresh_region_list()
             self._preview_timer.start()
 
     # 划选标记与高亮预览
@@ -490,6 +494,8 @@ class MainWindow(QMainWindow):
             self,
             main_font_size=self._int_of(self._ui.lineEdit_9, 36),
             page=self._preview_index + 1,
+            roles=self._roles,
+            role_id=0,
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -499,6 +505,7 @@ class MainWindow(QMainWindow):
         region = TextRegion(
             x=x, y=y, w=w, h=h,
             text=text,
+            role_id=dlg.region_role_id,
             font_path=dlg.region_font_path,
             printed=dlg.region_printed,
             font_size=dlg.region_font_size,
@@ -538,6 +545,19 @@ class MainWindow(QMainWindow):
         self._refresh_region_list()
         self._preview_timer.start()
 
+    def _region_style_label(self, region: TextRegion) -> str:
+        """区域列表里的样式摘要：绑定角色时显示角色名（对齐 Rust regionLabel）。"""
+        if region.role_id >= 2:
+            role = next((r for r in self._roles if r.id == region.role_id), None)
+            if role is not None:
+                return role.name
+            from ..core.doc_render import HIGHLIGHT_NAMES
+
+            hl_name = HIGHLIGHT_NAMES.get(region.highlight or "", "")
+            base = f"手写角色{region.role_id - 1}"
+            return f"{base}（{hl_name}）" if hl_name else base
+        return "打印" if region.printed else "手写"
+
     def _refresh_region_list(self) -> None:
         """刷新区域列表（红框不再常驻，仅悬浮列表项时临时高亮）。"""
         from PyQt6.QtWidgets import QListWidgetItem
@@ -546,8 +566,13 @@ class MainWindow(QMainWindow):
         lst.blockSignals(True)
         lst.clear()
         for i, region in enumerate(self._regions, start=1):
+            style = self._region_style_label(region)
+            page = f" 第{region.page}页" if region.page > 1 else ""
             tag = " [已自定义]" if region.has_overrides() else ""
-            item = QListWidgetItem(f"{region.label(i)}{tag}")
+            item = QListWidgetItem(
+                f"{i}. {style}{page} {len(region.text)}字 "
+                f"({region.x},{region.y} {region.w}×{region.h}){tag}"
+            )
             if region.has_overrides():
                 item.setToolTip("包含独立自定义排版/扰动/颜色/边距覆盖项")
             lst.addItem(item)
@@ -694,6 +719,8 @@ class MainWindow(QMainWindow):
             align=region.align,
             indent_em=region.indent_em,
             paragraphs=region.paragraphs,
+            roles=self._roles,
+            role_id=region.role_id or (1 if region.printed else 0),
             word_spacing=region.word_spacing,
             line_spacing=region.line_spacing,
             font_size_sigma=region.font_size_sigma,
@@ -715,6 +742,7 @@ class MainWindow(QMainWindow):
         if not dlg.region_text.strip():
             return
         region.text = dlg.region_text
+        region.role_id = dlg.region_role_id
         region.printed = dlg.region_printed
         region.font_path = dlg.region_font_path
         region.font_size = dlg.region_font_size
@@ -769,7 +797,11 @@ class MainWindow(QMainWindow):
     # 文档底图（PDF / Word 打印预览）
     # ------------------------------------------------------------------
     def _import_document(self) -> None:
-        """导入 PDF/DOCX：把打印预览逐页渲染为背景（替换当前背景）。"""
+        """导入 PDF/DOCX：把打印预览逐页渲染为背景（替换当前背景）。
+
+        同时自动识别文档中标记的手写填空区域（高亮底色 / {{...}}、
+        【...】占位标签），生成 TextRegion 列表并按高亮颜色关联笔迹角色。
+        """
         start_dir = str(Path(assets_root()) / "backgrounds")
         path, _ = QFileDialog.getOpenFileName(
             self, "导入 PDF / Word 文档", start_dir, "文档 (*.pdf *.docx)"
@@ -786,14 +818,61 @@ class MainWindow(QMainWindow):
             return
         out_dir = Path(self._out_dir) / ".preview_cache" / "doc_bg"
         try:
-            pages = doc_render.document_to_page_images(path, out_dir, dpi=200)
+            pages, regions = doc_render.document_to_page_images_with_regions(
+                path, out_dir, dpi=200
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
         self._doc_pages = [str(p) for p in pages]
         self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
         self._ui.lineEdit_2.setText(str(pages[0]))
+        if regions:
+            # 识别到标记区域：同步角色（同色 -> 同角色）并替换区域列表
+            self._sync_detected_roles(regions)
+            self._regions = regions
+            self._editing_row = None
+            self._ui.label_11.end_region_edit()
+            self._show_region_highlight(None)
+            self._refresh_region_list()
+            QMessageBox.information(
+                self,
+                "导入完成",
+                f"已导入文档底图（共 {len(pages)} 页），\n"
+                f"自动识别提取了 {len(regions)} 处手写填空区域，\n"
+                "已在区域列表中生成对应条目并关联笔迹角色。",
+            )
         self._preview_timer.start()
+
+    def _sync_detected_roles(self, regions: list[TextRegion]) -> None:
+        """把底图识别出的区域同步到角色列表（对齐 Rust 版 store.importDocument）。
+
+        同一高亮颜色在文档中映射到同一角色（首次出现 -> 角色2，次出现 -> 3 …）；
+        已存在的角色补记高亮绑定，缺失的按需创建。
+        """
+        from ..core.doc_render import HIGHLIGHT_NAMES
+
+        changed = False
+        for rid in sorted({r.role_id for r in regions if r.role_id >= 2}):
+            matching = next(
+                (r for r in regions if r.role_id == rid and r.highlight), None
+            ) or next((r for r in regions if r.role_id == rid), None)
+            highlight = matching.highlight if matching else None
+            hl_name = HIGHLIGHT_NAMES.get(highlight or "", "")
+            name = f"手写角色{rid - 1}" + (f"（{hl_name}）" if hl_name else "")
+            existing = next((x for x in self._roles if x.id == rid), None)
+            if existing is not None:
+                if not existing.highlight and highlight:
+                    existing.highlight = highlight
+                    changed = True
+            else:
+                self._roles.append(
+                    HandwritingRole(id=rid, name=name, printed=False, highlight=highlight)
+                )
+                changed = True
+        if changed:
+            self._roles = sorted(self._roles, key=lambda r: r.id)
+            self._refresh_role_list()
 
     def _sync_doc_state(self) -> None:
         """背景路径不再指向文档首页时（手动改选），清除文档底图状态。"""
@@ -1290,6 +1369,8 @@ class MainWindow(QMainWindow):
                     w=max(1, round(r.w * scale)),
                     h=max(1, round(r.h * scale)),
                     text=r.text,
+                    role_id=r.role_id,
+                    highlight=r.highlight,
                     font_path=r.font_path,
                     printed=r.printed,
                     font_size=round(r.font_size * scale) if r.font_size else 0,
