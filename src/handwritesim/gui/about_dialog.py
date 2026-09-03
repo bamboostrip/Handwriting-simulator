@@ -14,6 +14,7 @@ from ..core.updater import (
     is_auto_check_enabled,
     set_auto_check_enabled,
 )
+from .guide_dialog import GuideDialog
 from .resources import resource_path
 from .update_dialog import UpdateDialog
 
@@ -135,8 +136,14 @@ class AboutDialog(QtWidgets.QDialog):
 
         layout.addStretch(1)
 
-        # 底部确定按钮
+        # 底部按钮：使用指南 + 确定
         row_bottom = QtWidgets.QHBoxLayout()
+        self.btn_guide = QtWidgets.QPushButton("📖 使用指南", self)
+        self.btn_guide.setObjectName("btn_guide")
+        self.btn_guide.setToolTip("分章节查看各功能的使用方法（基础与进阶）")
+        self.btn_guide.setMinimumWidth(110)
+        self.btn_guide.clicked.connect(self._open_guide)
+        row_bottom.addWidget(self.btn_guide)
         row_bottom.addStretch(1)
         btn_close = QtWidgets.QPushButton("确定", self)
         btn_close.setProperty("primary", True)
@@ -144,6 +151,11 @@ class AboutDialog(QtWidgets.QDialog):
         btn_close.clicked.connect(self.accept)
         row_bottom.addWidget(btn_close)
         layout.addLayout(row_bottom)
+
+    def _open_guide(self) -> None:
+        """打开使用指南对话框。"""
+        dlg = GuideDialog(self)
+        dlg.exec()
 
     def _manual_check_update(self) -> None:
         """手动触发检查更新。"""
