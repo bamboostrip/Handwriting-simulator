@@ -703,7 +703,8 @@ def load_paragraphs_with_runs(
                             role = alloc_for_highlight(hl)
                         runs.append(TextRun(text=seg_text, role_id=role, color=col, **_font_kwargs_for(role)))
                     else:
-                        role = alloc_for_tag(seg_key)
+                        # 全部手写模式下忽略标签的角色指令，仅保留剥离语法后的文本
+                        role = 0 if ignore_highlights else alloc_for_tag(seg_key)
                         runs.append(TextRun(text=seg_text, role_id=role, color=col, **_font_kwargs_for(role)))
         if not runs:
             continue

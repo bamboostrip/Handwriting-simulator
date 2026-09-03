@@ -144,3 +144,33 @@ def test_has_docx_highlights_and_ignore(tmp_path):
     doc2.save(str(no_hl_path))
     assert has_docx_highlights(no_hl_path) is False
     assert has_docx_highlights(tmp_path / "not_found.docx") is False
+
+
+def test_ignore_highlights_neutralizes_tags(tmp_path):
+    """忽略高亮（全部手写）时，{{标签}}不再分配打印/多角色，但标签语法仍被剥离。"""
+    from handwritesim.core.docx_io import load_paragraphs_with_runs
+    from docx import Document
+    from docx.enum.text import WD_COLOR_INDEX
+
+    doc_path = tmp_path / "hl_tag.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    r1 = p.add_run("普通文字 ")
+    r1.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    p.add_run("{{打印:标签内容}}")
+    p.add_run(" 结尾")
+    doc.save(str(doc_path))
+
+    # 忽略高亮模式：所有 run 均为默认手写，且标签语法不残留
+    paras_hand = load_paragraphs_with_runs(doc_path, 36, ignore_highlights=True)
+    runs = [r for para in paras_hand for r in para.runs]
+    assert runs
+    assert all(r.role_id == 0 for r in runs)
+    full_text = "".join(r.text for r in runs)
+    assert "{{" not in full_text and "}}" not in full_text
+    assert "标签内容" in full_text
+
+    # 默认模式：标签仍生效（打印体 role 1），行为不受影响
+    paras_mixed = load_paragraphs_with_runs(doc_path, 36, ignore_highlights=False)
+    roles_mixed = {r.role_id for para in paras_mixed for r in para.runs}
+    assert 1 in roles_mixed
