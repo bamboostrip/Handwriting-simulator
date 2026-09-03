@@ -714,6 +714,22 @@ def test_gui_import_document_populates_regions_and_roles(_qapp, tmp_path, monkey
         QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
     )
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(
+        QMessageBox,
+        "exec",
+        lambda self: setattr(
+            self,
+            "_clicked_btn",
+            next(
+                (b for b in self.buttons() if "提取填空框" in b.text()),
+                self.defaultButton(),
+            ),
+        )
+        or 0,
+    )
+    monkeypatch.setattr(
+        QMessageBox, "clickedButton", lambda self: getattr(self, "_clicked_btn", None)
+    )
 
     win._import_document()
 

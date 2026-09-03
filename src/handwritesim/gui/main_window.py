@@ -24,7 +24,7 @@ from .. import __version__
 from ..core.models import HandwritingParams, Paragraph, TextRegion, TextRun, HandwritingRole, default_roles
 from ..core import doc_render
 from ..core import presets
-from ..core.docx_io import load_paragraphs_with_runs, extract_roles_from_paragraphs, _is_chinese_heading
+from ..core.docx_io import load_paragraphs_with_runs, extract_roles_from_paragraphs, _is_chinese_heading, has_docx_highlights
 from .role_manager import RoleManagerDialog, role_background
 from ..core.paths import assets_root, ensure_assets_dirs
 from ..core.updater import (
@@ -414,8 +414,33 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "导入 docx", "", "Word 文档 (*.docx)")
         if not path:
             return
+        ignore_hl = False
+        if has_docx_highlights(path):
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("检测到文字高亮标记")
+            msg_box.setText("检测到文档中部分文字带有高亮或背景色。\n\n请选择排版方式：")
+            msg_box.setIcon(QMessageBox.Icon.Question)
+            btn_all_handwriting = msg_box.addButton(
+                "全部作为手写（推荐）", QMessageBox.ButtonRole.AcceptRole
+            )
+            btn_mixed = msg_box.addButton("打印/手写混排", QMessageBox.ButtonRole.ActionRole)
+            btn_cancel = msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            msg_box.setDefaultButton(btn_all_handwriting)
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+            if clicked == btn_cancel or clicked is None:
+                return
+            if clicked == btn_all_handwriting:
+                ignore_hl = True
+            elif clicked == btn_mixed:
+                ignore_hl = False
+            else:
+                return
+
         try:
-            paras = load_paragraphs_with_runs(path, self._int_of(self._ui.lineEdit_9, 36))
+            paras = load_paragraphs_with_runs(
+                path, self._int_of(self._ui.lineEdit_9, 36), ignore_highlights=ignore_hl
+            )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
@@ -824,25 +849,72 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "导入失败", str(exc))
             return
-        self._doc_pages = [str(p) for p in pages]
-        self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
-        self._ui.lineEdit_2.setText(str(pages[0]))
         if regions:
-            # 识别到标记区域：同步角色（同色 -> 同角色）并替换区域列表
-            self._sync_detected_roles(regions)
-            self._regions = regions
-            self._editing_row = None
-            self._ui.label_11.end_region_edit()
-            self._show_region_highlight(None)
-            self._refresh_region_list()
-            QMessageBox.information(
-                self,
-                "导入完成",
-                f"已导入文档底图（共 {len(pages)} 页），\n"
-                f"自动识别提取了 {len(regions)} 处手写填空区域，\n"
-                "已在区域列表中生成对应条目并关联笔迹角色。",
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("检测到手写填空标记")
+            msg_box.setText(
+                f"检测到文档包含 {len(regions)} 处高亮标记或填空区域。\n\n请选择底图处理方式："
             )
-        self._preview_timer.start()
+            msg_box.setIcon(QMessageBox.Icon.Question)
+            btn_extract = msg_box.addButton(
+                "提取填空框（推荐）", QMessageBox.ButtonRole.AcceptRole
+            )
+            btn_keep_raw = msg_box.addButton(
+                "保留完整底图", QMessageBox.ButtonRole.ActionRole
+            )
+            btn_cancel = msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            msg_box.setDefaultButton(btn_extract)
+            msg_box.exec()
+            clicked = msg_box.clickedButton()
+            if clicked == btn_cancel or clicked is None:
+                return
+            if clicked == btn_keep_raw:
+                raw_pages = [
+                    Path(p).with_name(f"{Path(p).stem}_raw{Path(p).suffix}")
+                    for p in pages
+                ]
+                final_pages = [
+                    str(rp) if rp.exists() else str(p)
+                    for rp, p in zip(raw_pages, pages)
+                ]
+                self._doc_pages = final_pages
+                self._ui.lineEdit_14.setText(
+                    f"{Path(path).name}（{len(final_pages)} 页，完整底图）"
+                )
+                self._ui.lineEdit_2.setText(final_pages[0])
+                self._regions = []
+                self._editing_row = None
+                self._ui.label_11.end_region_edit()
+                self._show_region_highlight(None)
+                self._refresh_region_list()
+                self._preview_timer.start()
+                return
+            elif clicked == btn_extract:
+                self._doc_pages = [str(p) for p in pages]
+                self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
+                self._ui.lineEdit_2.setText(str(pages[0]))
+                self._sync_detected_roles(regions)
+                self._regions = regions
+                self._editing_row = None
+                self._ui.label_11.end_region_edit()
+                self._show_region_highlight(None)
+                self._refresh_region_list()
+                QMessageBox.information(
+                    self,
+                    "导入完成",
+                    f"已导入文档底图（共 {len(pages)} 页），\n"
+                    f"自动识别提取了 {len(regions)} 处手写填空区域，\n"
+                    "已在区域列表中生成对应条目并关联笔迹角色。",
+                )
+                self._preview_timer.start()
+                return
+            else:
+                return
+        else:
+            self._doc_pages = [str(p) for p in pages]
+            self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
+            self._ui.lineEdit_2.setText(str(pages[0]))
+            self._preview_timer.start()
 
     def _sync_detected_roles(self, regions: list[TextRegion]) -> None:
         """把底图识别出的区域同步到角色列表（对齐 Rust 版 store.importDocument）。
