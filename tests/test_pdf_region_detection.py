@@ -413,6 +413,38 @@ def test_pdf_to_images_with_regions_end_to_end(tmp_path) -> None:
     assert (out1[100:140, 80:300] == 255).all()
 
 
+def test_doc_render_preserves_raw_page_images(tmp_path) -> None:
+    out_dir = tmp_path / "out"
+    pdf = _make_highlight_pdf(tmp_path, [
+        [(60, 90, 50, 150, (255, 255, 0))],
+        [(100, 140, 80, 300, (0, 255, 255))],
+    ])
+    paths, regions = pdf_to_images_with_regions(pdf, out_dir, dpi=96, prefix="page")
+
+    assert len(paths) == 2
+    raw_path_0 = out_dir / "page_0_raw.png"
+    raw_path_1 = out_dir / "page_1_raw.png"
+    assert raw_path_0.exists(), f"Expected raw page image {raw_path_0} to exist"
+    assert raw_path_1.exists(), f"Expected raw page image {raw_path_1} to exist"
+
+    # raw 图像保留了原高亮像素（非白色）
+    raw0_arr = np.asarray(Image.open(raw_path_0).convert("RGB"))
+    assert not (raw0_arr[60:90, 50:150] == 255).all()
+    assert np.allclose(raw0_arr[70:80, 60:140], [255, 255, 0], atol=10)
+
+    # 抹白图像 paths[0] 对应的高亮区域已被抹为纯白
+    erased0_arr = np.asarray(Image.open(paths[0]).convert("RGB"))
+    assert (erased0_arr[60:90, 50:150] == 255).all()
+
+    # 第 2 页验证
+    raw1_arr = np.asarray(Image.open(raw_path_1).convert("RGB"))
+    assert not (raw1_arr[100:140, 80:300] == 255).all()
+    assert np.allclose(raw1_arr[110:130, 90:290], [0, 255, 255], atol=10)
+
+    erased1_arr = np.asarray(Image.open(paths[1]).convert("RGB"))
+    assert (erased1_arr[100:140, 80:300] == 255).all()
+
+
 def test_document_import_unsupported_type(tmp_path) -> None:
     with pytest.raises(ValueError):
         document_to_page_images_with_regions(tmp_path / "a.txt", tmp_path)

@@ -818,6 +818,8 @@ def pdf_to_images_with_regions(
 
         for index, page in enumerate(doc):
             image = page.render(scale=scale).to_pil().convert("RGB")
+            raw_path = out_dir / f"{prefix}_{index}_raw.png"
+            image.save(raw_path)
             arr = np.array(image)  # 可写拷贝（后续就地抹白高亮/标签）
 
             # 1. 提取页面所有字符对象及其包围盒与字号
