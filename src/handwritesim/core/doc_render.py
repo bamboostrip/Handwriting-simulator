@@ -424,10 +424,15 @@ def _is_full_width_char(ch: str) -> bool:
 def _resolve_font_size_px(matched: list[ExtractedChar], scale: float) -> int:
     """从匹配字符解析字号（像素）。
 
-    pdfium 的 FPDFText_GetFontSize 对嵌入非标准 FontMatrix 的字体（如
-    Word 导出的中文 PDF）会返回放大数十倍的值，这里用字符包围盒高度做
-    一致性校验：平均 raw 字号偏离 loose 包围盒高度超界时，改用全角字符
-    紧包围盒高度（≈字号）估计；无全角字符时按 loose 高度 / 1.15 估计。
+    pdfium 的字号接口对嵌入非标准 FontMatrix 的字体会产生偏差：
+    - pypdfium2 的 FPDFText_GetFontSize 对 Word 中文 PDF 返回放大数十倍的值；
+    - pdfium-render 的 scaled_font_size 则偏大约 5%~10%。
+    这里统一用字符包围盒做校验/校准：
+    - raw 字号对 loose 包围盒高度明显失真（超出 [0.35, 1.5] 区间）时，
+      回退到全角字符紧包围盒高度（≈字号）估计；
+    - 存在全角字符且 raw 可信时，仍取 min(raw, 全角紧包围盒最大高)——
+      宁可略小也不放不下（与 Rust 版 resolve_font_size_px 对齐）；
+    - 无全角字符时按 loose 高度 / 1.15 估计。
     """
     sizes = [c.font_size_pt for c in matched if c.font_size_pt > 0.0]
     loose_heights = [abs(c.max_y - c.min_y) for c in matched if abs(c.max_y - c.min_y) > 0.0]
@@ -435,21 +440,21 @@ def _resolve_font_size_px(matched: list[ExtractedChar], scale: float) -> int:
     avg_loose = sum(loose_heights) / len(loose_heights) if loose_heights else 0.0
 
     plausible = avg_raw > 0.0 and avg_loose > 0.0 and 0.35 * avg_loose <= avg_raw <= 1.5 * avg_loose
-    if plausible:
-        return int(round(avg_raw * scale))
-
     fw_glyphs = [c.glyph_h_pt for c in matched if _is_full_width_char(c.ch) and c.glyph_h_pt > 0.0]
     if fw_glyphs:
-        # 全角字符（汉字等）紧包围盒高度 ≈ 字号；取最大值避免标点拉低
-        est_pt = max(fw_glyphs)
-    elif avg_loose > 0.0:
+        # 全角字符（汉字等）紧包围盒高度 ≈ 字号；取最大值避免标点/小字形拉低
+        glyph_px = int(round(max(fw_glyphs) * scale))
+        if plausible:
+            return min(int(round(avg_raw * scale)), glyph_px)
+        return glyph_px
+    if plausible:
+        return int(round(avg_raw * scale))
+    if avg_loose > 0.0:
         # 西文字体 loose 包围盒 ≈ 字号 × 1.1~1.2
-        est_pt = avg_loose / 1.15
-    elif avg_raw > 0.0:
-        est_pt = avg_raw
-    else:
-        return 0
-    return int(round(est_pt * scale))
+        return int(round(avg_loose / 1.15 * scale))
+    if avg_raw > 0.0:
+        return int(round(avg_raw * scale))
+    return 0
 
 
 def extract_pdf_page_chars(page, dpi: int) -> list[ExtractedChar]:

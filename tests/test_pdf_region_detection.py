@@ -226,6 +226,14 @@ def test_resolve_font_size_falls_back_when_raw_inflated() -> None:
     ]
     assert _resolve_font_size_px(chars_ok, scale) == round(24.0 * scale)
 
+    # raw 轻度偏大（pdfium-render 场景，仍在可信区间）+ 存在全角字符：
+    # 取 min(raw, 全角紧包围盒) —— 宁可略小也不放不下（与 Rust 版对齐）
+    chars_slight = [
+        ExtractedChar("张", 0, 0, 21.12, 21.12, 11.16, glyph_h_pt=10.18),
+        ExtractedChar("三", 25, 0, 46.12, 21.12, 11.16, glyph_h_pt=10.19),
+    ]
+    assert _resolve_font_size_px(chars_slight, scale) == round(10.19 * scale)
+
 
 # ---------------------------------------------------------------------------
 # 高亮框 + 标签区域合并与角色分配
