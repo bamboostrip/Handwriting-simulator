@@ -25,3 +25,5 @@ _*.png
 # IDE
 .idea/
 .vscode/
+
+.superpowers/
