@@ -517,14 +517,36 @@ _ROLE_DEFAULT_NAMES: dict[int, str] = {
 }
 
 
-def load_paragraphs(path: str | Path, font_size: int | None = None) -> list[Paragraph]:
+def has_docx_highlights(path: str | Path) -> bool:
+    """快速检查 docx 是否包含任何有效高亮（_run_highlight(run) is not None 且 run.text 非空）。
+
+    包含异常捕获，若读取失败返回 False。
+    """
+    try:
+        doc = Document(str(path))
+        for para in doc.paragraphs:
+            for run in para.runs:
+                if run.text and _run_highlight(run) is not None:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def load_paragraphs(
+    path: str | Path,
+    font_size: int | None = None,
+    ignore_highlights: bool = False,
+) -> list[Paragraph]:
     """读取 docx 中每个段落，返回 [Paragraph]（忽略空段落）。"""
-    paras = load_paragraphs_with_runs(path, font_size=font_size)
+    paras = load_paragraphs_with_runs(path, font_size=font_size, ignore_highlights=ignore_highlights)
     return paras
 
 
 def load_paragraphs_with_runs(
-    path: str | Path, font_size: int | None = None
+    path: str | Path,
+    font_size: int | None = None,
+    ignore_highlights: bool = False,
 ) -> list[Paragraph]:
     """读取 docx 返回带 TextRun 的段落列表（支持高亮精准颜色映射与标签）。"""
     doc = Document(str(path))
@@ -535,13 +557,14 @@ def load_paragraphs_with_runs(
     global_px = float(font_size) if font_size else None
     # 预扫描：文档级是否有任意高亮（决定无标记文本的默认去向）
     has_any_highlight = False
-    for para in doc.paragraphs:
-        for run in para.runs:
-            if run.text and _run_highlight(run) is not None:
-                has_any_highlight = True
+    if not ignore_highlights:
+        for para in doc.paragraphs:
+            for run in para.runs:
+                if run.text and _run_highlight(run) is not None:
+                    has_any_highlight = True
+                    break
+            if has_any_highlight:
                 break
-        if has_any_highlight:
-            break
     result: list[Paragraph] = []
     highlight_to_role: dict[str, int] = {}
     tag_to_role: dict[str, int] = {}
@@ -634,7 +657,7 @@ def load_paragraphs_with_runs(
             raw = run.text
             if not raw:
                 continue
-            hl = _run_highlight(run)
+            hl = None if ignore_highlights else _run_highlight(run)
             col = _run_color(run)
             fam = _run_font_family(run, para)
             is_bold = _run_bold(run, para, doc) or is_heading_para

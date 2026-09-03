@@ -109,3 +109,38 @@ def test_first_line_chars_takes_priority(tmp_path):
     doc.save(path)
     paras = load_paragraphs(path, font_size=140)
     assert paras[0].first_line_indent == 280
+
+
+def test_has_docx_highlights_and_ignore(tmp_path):
+    from handwritesim.core.docx_io import has_docx_highlights, load_paragraphs_with_runs
+    from docx import Document
+    from docx.enum.text import WD_COLOR_INDEX
+
+    doc_path = tmp_path / "test_hl.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("Normal text ")
+    r2 = p.add_run("Highlighted text")
+    r2.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    doc.save(str(doc_path))
+
+    assert has_docx_highlights(doc_path) is True
+
+    # 默认模式：混排
+    paras_mixed = load_paragraphs_with_runs(doc_path, 36, ignore_highlights=False)
+    roles_mixed = {r.role_id for p in paras_mixed for r in p.runs}
+    assert 1 in roles_mixed  # 包含打印体
+    assert any(rid >= 2 for rid in roles_mixed)  # 包含高亮角色
+
+    # 忽略高亮模式：全部手写
+    paras_hand = load_paragraphs_with_runs(doc_path, 36, ignore_highlights=True)
+    roles_hand = {r.role_id for p in paras_hand for r in p.runs}
+    assert roles_hand == {0}  # 只有默认手写
+
+    # 无高亮文档与异常路径测试
+    no_hl_path = tmp_path / "no_hl.docx"
+    doc2 = Document()
+    doc2.add_paragraph("Plain text only")
+    doc2.save(str(no_hl_path))
+    assert has_docx_highlights(no_hl_path) is False
+    assert has_docx_highlights(tmp_path / "not_found.docx") is False
