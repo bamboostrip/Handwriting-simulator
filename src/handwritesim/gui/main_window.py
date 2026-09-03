@@ -914,6 +914,11 @@ class MainWindow(QMainWindow):
             self._doc_pages = [str(p) for p in pages]
             self._ui.lineEdit_14.setText(f"{Path(path).name}（{len(pages)} 页）")
             self._ui.lineEdit_2.setText(str(pages[0]))
+            self._regions = []
+            self._editing_row = None
+            self._ui.label_11.end_region_edit()
+            self._show_region_highlight(None)
+            self._refresh_region_list()
             self._preview_timer.start()
 
     def _sync_detected_roles(self, regions: list[TextRegion]) -> None:

@@ -612,12 +612,18 @@ def test_import_document_without_regions_no_dialog(
     window, monkeypatch, tmp_path: Path
 ) -> None:
     """底图导入：无填空标记时静默导入普通底图，不弹手写填空标记选择对话框。"""
+    from handwritesim.core.models import TextRegion
     import handwritesim.core.doc_render as doc_render
 
     doc_file = tmp_path / "plain.pdf"
     doc_file.touch()
     page_img = tmp_path / "plain_0.png"
     page_img.touch()
+
+    # 模拟导入前已有旧区域（如手动绘制或上一个文档遗留）
+    window._regions = [
+        TextRegion(x=10, y=10, w=100, h=40, page=1, role_id=2, highlight="yellow")
+    ]
 
     monkeypatch.setattr(
         QFileDialog,
