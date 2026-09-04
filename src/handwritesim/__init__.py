@@ -3,7 +3,7 @@
 提供可复用的核心引擎（core）、图形界面（gui）与命令行（cli）。
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from .core.engine import HandwritingEngine
 from .core.models import HandwritingParams

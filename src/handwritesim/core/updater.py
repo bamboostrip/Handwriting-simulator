@@ -267,6 +267,34 @@ def download_file(
         return False
 
 
+def build_updater_bat_content(
+    new_file_path: Path,
+    target_exe_path: Path,
+    downloaded_file_path: Path,
+    sleep_vbs_path: Path,
+) -> str:
+    """生成 Windows 更新批处理脚本内容。
+
+    流程：延时 1 秒等主进程退出释放 exe 占用 → 覆盖复制新版 exe →
+    清理下载文件与延时脚本 → 重新拉起新版 → 自删 bat。
+
+    全程无窗口约束：延时必须用 ``wscript //B //Nologo`` + ``.vbs``
+    （windows 子系统，永不分配控制台）。严禁用 ``ping`` / ``timeout`` /
+    ``choice`` 等控制台程序做延时：父进程的 CREATE_NO_WINDOW 不会继承给
+    孙进程，Win11 默认终端会为每个此类子进程弹一个新终端窗口。
+    其余命令均为 cmd 内部命令，不产生子进程。
+    """
+    return f"""@echo off
+chcp 65001 >nul
+wscript //B //Nologo "{sleep_vbs_path}" >nul 2>&1
+copy /y "{new_file_path}" "{target_exe_path}" >nul
+if exist "{downloaded_file_path}" del /f /q "{downloaded_file_path}" >nul
+if exist "{sleep_vbs_path}" del /f /q "{sleep_vbs_path}" >nul
+start "" "{target_exe_path}"
+(goto) 2>nul & del "%~f0"
+"""
+
+
 def apply_portable_update_and_restart(new_file_path: Path, target_exe_path: Path | None = None) -> None:
     """生成并启动便携版无锁替换脚本，退出当前进程并重新拉起新版。"""
     if target_exe_path is None:
@@ -274,21 +302,13 @@ def apply_portable_update_and_restart(new_file_path: Path, target_exe_path: Path
 
     temp_dir = Path(os.environ.get("TEMP", os.getcwd()))
     bat_file = temp_dir / f"handwritesim_updater_{os.getpid()}.bat"
+    # 无窗口延时脚本（wscript 为 windows 子系统，不弹任何终端窗口）
+    sleep_vbs = temp_dir / f"handwritesim_sleep_{os.getpid()}.vbs"
+    sleep_vbs.write_text("WScript.Sleep 1000\r\n", encoding="utf-8")
 
-    # 生成 Windows 批处理更新脚本：
-    # 1. 延时 1 秒等待当前主进程完全退出并释放 exe 占用
-    # 2. 覆盖复制新版 exe
-    # 3. 删除下载的临时新文件
-    # 4. 重新拉起新版程序
-    # 5. 自删除 bat 脚本
-    bat_content = f"""@echo off
-chcp 65001 >nul
-ping 127.0.0.1 -n 2 >nul
-copy /y "{str(new_file_path)}" "{str(target_exe_path)}" >nul
-if exist "{str(new_file_path)}" del /f /q "{str(new_file_path)}" >nul
-start "" "{str(target_exe_path)}"
-(goto) 2>nul & del "%~f0"
-"""
+    bat_content = build_updater_bat_content(
+        Path(new_file_path), target_exe_path, Path(new_file_path), sleep_vbs
+    )
     bat_file.write_text(bat_content, encoding="utf-8")
 
     creationflags = 0

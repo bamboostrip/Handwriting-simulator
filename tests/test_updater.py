@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import QApplication
 
 from handwritesim.core.updater import (
     UpdateInfo,
+    build_updater_bat_content,
     clean_version,
     compare_versions,
     get_skipped_version,
@@ -180,3 +181,19 @@ def test_update_dialog_render(app) -> None:
     assert not pix.isNull()
     assert pix.width() > 0
     dlg.close()
+
+
+def test_updater_bat_uses_windowless_sleep(tmp_path) -> None:
+    """更新批处理必须全程无窗口：严禁用 ping/timeout 做延时。
+
+    Win11 默认终端会为每个控制台子进程弹新窗口，且 CREATE_NO_WINDOW
+    不会继承给孙进程；延时只能走 windows 子系统的 wscript + .vbs。
+    """
+    content = build_updater_bat_content(
+        tmp_path / "HandWriteSim-new.exe",
+        tmp_path / "HandWriteSim.exe",
+        tmp_path / "update-tmp.exe",
+        tmp_path / "sleep.vbs",
+    )
+    assert "ping " not in content, f"批处理不得用 ping 延时（会弹终端窗口）：\n{content}"
+    assert "wscript //B //Nologo" in content, f"批处理延时必须走 wscript 无窗口脚本：\n{content}"
