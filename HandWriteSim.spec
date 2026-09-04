@@ -114,16 +114,18 @@ a = Analysis(
 # 从收集结果中剔除未使用的 Qt DLL（Qt6Gui/Qt6Widgets 不依赖它们）：
 # - Qt6Pdf（PDF 模块）、Qt6Svg（SVG 模块）
 # - opengl32sw（Qt 软件 OpenGL 渲染器，QWidgets 光栅渲染不需要）
-# - Qt6Network（本应用不用网络；若 Qt6Gui 链接它则启动会失败，已实测可移除）
+# - Qt6Network（Qt 网络模块；本应用网络走 Python 标库 urllib，不走 QtNetwork）
 # 注意：仅 Windows 实测可安全移除（文件名固定为 *.dll）；Linux/macOS 的
 # 动态链接关系未经实测，保留原文件避免启动失败。
+# 警告：绝不能剔除 libssl-3-x64.dll / libcrypto-3-x64.dll——它们是 CPython
+# _ssl.pyd 的依赖，检查更新/下载走 https（urllib）必须有它们。v0.4.0/v0.4.1
+# 曾误删导致打包版“无法连接至 GitHub Releases API”，见 tests/test_build_spec.py。
 if _IS_WIN:
     a.binaries = TOC(
         (name, path, typecode)
         for name, path, typecode in a.binaries
         if os.path.basename(name)
-        not in ("Qt6Pdf.dll", "Qt6Svg.dll", "opengl32sw.dll", "Qt6Network.dll",
-                "libssl-3-x64.dll", "libcrypto-3-x64.dll")
+        not in ("Qt6Pdf.dll", "Qt6Svg.dll", "opengl32sw.dll", "Qt6Network.dll")
     )
 
 # hook 默认全量收集 Qt 插件（imageformats 十余个、iconengines 等），

@@ -11,6 +11,16 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-04
+
+### Fixed
+
+- **修复打包版检查更新永远失败**（`无法连接至 GitHub Releases API`）：
+  `HandWriteSim.spec` 在 Windows 下误删了 `libssl-3-x64.dll` /
+  `libcrypto-3-x64.dll`（CPython `_ssl.pyd` 的依赖），导致打包版所有
+  `https`（检查更新 / 下载）必然失败。现仅剔除无用的 Qt DLL，保留
+  OpenSSL，并新增 `tests/test_build_spec.py` 回归测试锁定。
+
 ## [0.4.1] - 2026-09-04
 
 ### Fixed
