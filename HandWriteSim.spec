@@ -161,6 +161,10 @@ exe = EXE(
     strip=False,
     # UPX 压缩会破坏 macOS 签名，非 macOS 平台可用（未安装 upx 时自动跳过）
     upx=not _IS_MAC,
+    # UPX 5.x 压不了新工具链的 CFG 保护 DLL（如 CPython 3.14 的 python3.dll，
+    # 报 NotCompressibleException），显式排除以免构建日志刷 traceback；
+    # 被排除的文件仅以原样打入，体积影响约数 MB
+    upx_exclude=["python3*.dll", "api-ms-win-*.dll"],
     console=False,
     disable_windowed_traceback=False,
     # 图标仅 Windows 支持 .ico；Linux/macOS 不指定（PyInstaller 默认图标）
