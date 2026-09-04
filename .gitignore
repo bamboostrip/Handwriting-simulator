@@ -27,3 +27,6 @@ _*.png
 .vscode/
 
 .superpowers/
+
+# 论坛发布帖文案：本地运营文档，不入库
+docs/52pj-发布帖.md
