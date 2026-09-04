@@ -21,6 +21,7 @@ from handwritesim.core.updater import (
     set_auto_check_enabled,
     set_skipped_version,
     check_for_updates,
+    trim_release_notes_markdown,
 )
 from handwritesim.gui.about_dialog import AboutDialog
 from handwritesim.gui.update_dialog import UpdateDialog
@@ -142,6 +143,15 @@ def test_check_for_updates_ignores_zip_only(monkeypatch) -> None:
     assert info.version == "0.3.2"
     assert info.asset_name == ""
     assert info.asset_url == ""
+
+
+def test_trim_release_notes_markdown() -> None:
+    md = "## 更新内容\n- 新功能 A\n\n## 产物下载\n链接\n\n## 说明\n样板"
+    trimmed = trim_release_notes_markdown(md)
+    assert "## 更新内容" in trimmed
+    assert "新功能 A" in trimmed
+    assert "产物下载" not in trimmed
+    assert trim_release_notes_markdown("暂无更新说明。") == "暂无更新说明。"
 
 
 def test_about_dialog_render(app) -> None:

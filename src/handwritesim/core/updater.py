@@ -89,6 +89,23 @@ def compare_versions(v1: str, v2: str) -> int:
     return 0
 
 
+def trim_release_notes_markdown(md: str) -> str:
+    """从 Release 说明中只保留 `## 更新内容` 一节。
+
+    对齐 Rust 版同名逻辑：软件内弹窗只展示更新介绍，截掉其后的
+    下载说明 / 字体说明等每版重复的固定样板。无 `## ` 标题时原样返回。
+    """
+    lines = md.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == "## 更新内容"), None)
+    if start is None:
+        return md
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end]).strip() or md
+
+
 def is_auto_check_enabled() -> bool:
     """检查是否启用了启动时自动检查更新（默认 True）。"""
     settings = QSettings(_SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION)
@@ -147,7 +164,8 @@ def check_for_updates(
         tag_name = data.get("tag_name", "")
         latest_version = clean_version(tag_name)
         title = data.get("name", "") or tag_name
-        body = data.get("body", "") or "暂无更新说明。"
+        # 软件内只展示更新介绍，下载说明等样板在弹窗里没有意义（对齐 Rust 版裁剪）
+        body = trim_release_notes_markdown(data.get("body", "") or "暂无更新说明。")
         html_url = data.get("html_url", GITHUB_REPO_URL)
 
         # 只匹配单文件升级包（.exe）：自动更新直接下载单文件覆盖替换，

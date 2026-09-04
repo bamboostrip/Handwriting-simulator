@@ -123,21 +123,33 @@ jobs:
         run: |
           set -e
           TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
           PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
-          if [ -n "$PREV" ]; then
-            RANGE="${PREV}..${TAG}"
-            printf '## 更新内容\n\n自上一版本 **%s** 以来的变更：\n\n' "${PREV}" > release-notes.md
-          else
-            RANGE="${TAG}"
-            printf '## 更新内容\n\n首个自动发布版本，包含以下提交：\n\n' > release-notes.md
-          fi
-          git log --no-merges --pretty=format:"- %s" "${RANGE}" >> release-notes.md
-          printf '\n\n' >> release-notes.md
-          if [ -n "$PREV" ]; then
-            printf '▶ [查看完整提交记录](%s)\n\n' "https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}" >> release-notes.md
-          fi
-          # 下载说明模板：{TAG} 占位符替换为实际 tag，产物链接即指向本版资产
-          sed "s/{TAG}/${TAG}/g" packaging/release-body.md >> release-notes.md
+          # 更新介绍优先从 CHANGELOG.md 取当前版本小节（与 Rust 版同机制），
+          # 缺失时回退到该版本区间内的 git 提交列表，保证 Release 从不缺更新说明
+          awk -v ver="$VER" '
+              $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+              found && /^## / { exit }
+              found { print }
+          ' CHANGELOG.md > /tmp/changelog-section.md
+          {
+            printf '## 更新内容\n\n'
+            if [ -s /tmp/changelog-section.md ]; then
+              cat /tmp/changelog-section.md
+            elif [ -n "$PREV" ]; then
+              printf '自上一版本 **%s** 以来的变更：\n\n' "${PREV}"
+              git log --no-merges --pretty=format:"- %s" "${PREV}..${TAG}"
+            else
+              printf '首个自动发布版本，包含以下提交：\n\n'
+              git log --no-merges --pretty=format:"- %s" "${TAG}"
+            fi
+            printf '\n\n'
+            if [ -n "$PREV" ]; then
+              printf '▶ [查看完整提交记录](%s)\n\n' "https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+            fi
+            # 下载说明模板：{TAG} 占位符替换为实际 tag，产物链接即指向本版资产
+            sed "s/{TAG}/${TAG}/g" packaging/release-body.md
+          } > release-notes.md
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
