@@ -109,6 +109,41 @@ def test_check_for_updates_mocked(monkeypatch) -> None:
     assert info_all is not None
 
 
+def test_check_for_updates_ignores_zip_only(monkeypatch) -> None:
+    """只有 zip 便携包时不选资产：自动更新只走单文件 .exe。"""
+    mock_payload = {
+        "tag_name": "v0.3.2",
+        "name": "v0.3.2",
+        "body": "update",
+        "html_url": "https://github.com/bamboostrip/Handwriting-simulator/releases/tag/v0.3.2",
+        "assets": [
+            {
+                "name": "HandWriteSim-windows-x86_64.zip",
+                "browser_download_url": "https://github.com/example/HandWriteSim-windows-x86_64.zip",
+                "size": 999,
+            }
+        ],
+    }
+
+    class MockResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return json.dumps(mock_payload).encode("utf-8")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=5.0: MockResponse())
+
+    info = check_for_updates("0.3.1")
+    assert info is not None
+    assert info.version == "0.3.2"
+    assert info.asset_name == ""
+    assert info.asset_url == ""
+
+
 def test_about_dialog_render(app) -> None:
     dlg = AboutDialog()
     dlg.show()

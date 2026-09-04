@@ -150,7 +150,9 @@ def check_for_updates(
         body = data.get("body", "") or "暂无更新说明。"
         html_url = data.get("html_url", GITHUB_REPO_URL)
 
-        # 匹配下载资产（优先选择 HandWriteSim.exe 或 zip 便携包）
+        # 只匹配单文件升级包（.exe）：自动更新直接下载单文件覆盖替换，
+        # 不再走便携 zip（zip 需解压组装，无法原地替换）。若 Release 中没有
+        # 单文件资产则 asset_url 为空，调用方回退到浏览器手动下载。
         assets = data.get("assets", [])
         asset_name = ""
         asset_url = ""
@@ -163,10 +165,6 @@ def check_for_updates(
                 asset_url = a.get("browser_download_url", "")
                 asset_size = a.get("size", 0)
                 break
-            elif name.endswith(".zip") and not asset_url:
-                asset_name = name
-                asset_url = a.get("browser_download_url", "")
-                asset_size = a.get("size", 0)
 
         info = UpdateInfo(
             version=latest_version,

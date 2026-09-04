@@ -50,6 +50,7 @@ jobs:
         run: codesign --force --deep -s - "dist/${{ matrix.exe_name }}"
 
       # 组装便携包：exe + 预设 + 背景(webp) + 空 fonts 目录（用户自备字体）
+      # 同时产出单文件 exe（老用户升级直接替换旧 exe，应用内自动更新优先使用）
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -60,6 +61,7 @@ jobs:
           Copy-Item "dist/${{ matrix.exe_name }}" "staging/"
           Copy-Item "packaging/fonts-README.txt" "staging/fonts/README.txt"
           Compress-Archive -Path "staging/*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+          Copy-Item "dist/${{ matrix.exe_name }}" "${{ matrix.artifact }}.exe"
 
       - name: Package (Linux / macOS)
         if: runner.os != 'Windows'
@@ -73,12 +75,33 @@ jobs:
           cp packaging/fonts-README.txt staging/fonts/README.txt
           cd staging
           zip -r "../${{ matrix.artifact }}.zip" .
+          cd ..
+          # 单文件升级包：老用户直接替换旧二进制即可
+          cp "dist/${{ matrix.exe_name }}" "${{ matrix.artifact }}"
+          chmod +x "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
+          if-no-files-found: error
+
+      # 单文件版：老用户升级无需下载整包，直接替换旧二进制即可
+      - name: Upload single-file exe (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-exe
+          path: ${{ matrix.artifact }}.exe
+          if-no-files-found: error
+
+      - name: Upload single-file binary (Linux / macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-exe
+          path: ${{ matrix.artifact }}
           if-no-files-found: error
 
   release:
@@ -113,31 +136,11 @@ jobs:
           if [ -n "$PREV" ]; then
             printf '▶ [查看完整提交记录](%s)\n\n' "https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}" >> release-notes.md
           fi
-          cat >> release-notes.md <<'EOF'
-          ## 下载说明
-          
-          每个平台提供一个**便携 zip**（内含单文件可执行程序）：
-          - `HandWriteSim-windows-x86_64.zip`：Windows 版（内含 `HandWriteSim.exe`）
-          - `HandWriteSim-linux-x86_64.zip`：Linux 版
-          - `HandWriteSim-macos-arm64.zip`：macOS（Apple Silicon）版
-          
-          解压后即可使用（无需安装）：可执行文件 + `presets/` 预设 + `backgrounds/` 背景 + `fonts/` 字体目录。
-          首次运行会自动创建缺失的 `fonts/`、`backgrounds/`、`presets/` 目录，整个文件夹可随意拷贝到任意位置。
-          
-          ### 为什么没有字体？
-          
-          手写体字体多为商业版权字体（如汉呈、华阳、云江等字库），开源分发需要授权，
-          因此本仓库与发布包均**不包含字体文件**。
-          
-          请自备字体放入 `fonts/` 目录，或从开源 / 免费可商用字体中下载：
-          - 霞鹜文楷（LXGW WenKai）：OFL 1.1 协议，可商用，最接近手写体观感
-          - 沐瑶随心手写体 / 站酷小薇 / 站酷快乐体：免费可商用
-          
-          预设中的字体路径（如 `fonts/云烟体.ttf`）为占位名称，
-          放入对应字体文件后即可直接使用，也可以改用其他字体。
-          EOF
+          # 下载说明模板：{TAG} 占位符替换为实际 tag，产物链接即指向本版资产
+          sed "s/{TAG}/${TAG}/g" packaging/release-body.md >> release-notes.md
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          # 每个 artifact 均为单文件：3 平台 zip + 3 平台单文件
+          files: artifacts/**/*
           body_path: release-notes.md
