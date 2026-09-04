@@ -529,7 +529,7 @@ exit /b 1
 :copied
 if exist "{downloaded_file_path}" del /f /q "{downloaded_file_path}" >nul
 if exist "{sleep_vbs_path}" del /f /q "{sleep_vbs_path}" >nul
-{launcher_clean}start "" "{target_exe_path}"
+{launcher_clean}if not defined HANDWRITESIM_NO_RESTART start "" "{target_exe_path}"
 (goto) 2>nul & del "%~f0"
 """
 
@@ -556,7 +556,7 @@ def apply_portable_update_and_restart(new_file_path: Path, target_exe_path: Path
     # 彻底杜绝终端控制台黑框弹出，且完全独立于当前主进程。
     launcher_code = (
         f'Set WshShell = CreateObject("WScript.Shell")\r\n'
-        f'WshShell.Run "cmd.exe /c """"{bat_file}""""", 0, False\r\n'
+        f'WshShell.Run "cmd.exe /c " & Chr(34) & "{bat_file}" & Chr(34), 0, False\r\n'
     )
     launcher_vbs.write_text(launcher_code, encoding="utf-8")
 
