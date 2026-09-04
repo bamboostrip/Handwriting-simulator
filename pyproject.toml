@@ -1,6 +1,6 @@
 [project]
 name = "handwrite-simulator"
-version = "0.4.3"
+version = "0.4.4"
 description = "手写模拟器 - 基于 handright 的手写体生成工具（GUI + CLI）"
 requires-python = ">=3.12"
 dependencies = [

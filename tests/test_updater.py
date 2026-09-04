@@ -309,3 +309,5 @@ def test_updater_bat_uses_windowless_sleep(tmp_path) -> None:
     )
     assert "ping " not in content, f"批处理不得用 ping 延时（会弹终端窗口）：\n{content}"
     assert "wscript //B //Nologo" in content, f"批处理延时必须走 wscript 无窗口脚本：\n{content}"
+    assert ":copyloop" in content, "批处理必须包含重试循环以等待旧进程完全退出"
+    assert "goto copyfailed" in content, "批处理必须有失败退出逻辑"

@@ -197,6 +197,7 @@ class UpdateDialog(QtWidgets.QDialog):
             )
             apply_portable_update_and_restart(Path(path_or_err))
             QtWidgets.QApplication.quit()
+            os._exit(0)
         else:
             self.lbl_progress.setText(f"❌ 下载失败：{path_or_err}")
             QtWidgets.QMessageBox.warning(

@@ -493,25 +493,43 @@ def build_updater_bat_content(
     target_exe_path: Path,
     downloaded_file_path: Path,
     sleep_vbs_path: Path,
+    launcher_vbs_path: Path | None = None,
 ) -> str:
     """生成 Windows 更新批处理脚本内容。
 
-    流程：延时 1 秒等主进程退出释放 exe 占用 → 覆盖复制新版 exe →
-    清理下载文件与延时脚本 → 重新拉起新版 → 自删 bat。
+    流程：
+    1. 循环尝试覆盖复制（最多 20 次，每次间隔 500ms），等待旧主进程完全退出释放文件锁；
+    2. 覆盖成功后删除临时下载包与延时/启动脚本；
+    3. 重新拉起新版 exe 并自删 bat。
 
-    全程无窗口约束：延时必须用 ``wscript //B //Nologo`` + ``.vbs``
-    （windows 子系统，永不分配控制台）。严禁用 ``ping`` / ``timeout`` /
-    ``choice`` 等控制台程序做延时：父进程的 CREATE_NO_WINDOW 不会继承给
-    孙进程，Win11 默认终端会为每个此类子进程弹一个新终端窗口。
-    其余命令均为 cmd 内部命令，不产生子进程。
+    全程无窗口约束：延时与启动全部走 Windows GUI 子系统的 wscript，
+    严禁任何控制台命令弹窗。
     """
+    launcher_clean = (
+        f'if exist "{launcher_vbs_path}" del /f /q "{launcher_vbs_path}" >nul\n'
+        if launcher_vbs_path
+        else ""
+    )
     return f"""@echo off
 chcp 65001 >nul
+set /a tries=0
+:copyloop
 wscript //B //Nologo "{sleep_vbs_path}" >nul 2>&1
-copy /y "{new_file_path}" "{target_exe_path}" >nul
+copy /y "{new_file_path}" "{target_exe_path}" >nul 2>&1 && goto copied
+set /a tries+=1
+if %tries% geq 20 goto copyfailed
+goto copyloop
+
+:copyfailed
 if exist "{downloaded_file_path}" del /f /q "{downloaded_file_path}" >nul
 if exist "{sleep_vbs_path}" del /f /q "{sleep_vbs_path}" >nul
-start "" "{target_exe_path}"
+{launcher_clean}(goto) 2>nul & del "%~f0"
+exit /b 1
+
+:copied
+if exist "{downloaded_file_path}" del /f /q "{downloaded_file_path}" >nul
+if exist "{sleep_vbs_path}" del /f /q "{sleep_vbs_path}" >nul
+{launcher_clean}start "" "{target_exe_path}"
 (goto) 2>nul & del "%~f0"
 """
 
@@ -522,23 +540,27 @@ def apply_portable_update_and_restart(new_file_path: Path, target_exe_path: Path
         target_exe_path = Path(sys.executable).resolve()
 
     temp_dir = Path(os.environ.get("TEMP", os.getcwd()))
-    bat_file = temp_dir / f"handwritesim_updater_{os.getpid()}.bat"
-    # 无窗口延时脚本（wscript 为 windows 子系统，不弹任何终端窗口）
-    sleep_vbs = temp_dir / f"handwritesim_sleep_{os.getpid()}.vbs"
-    sleep_vbs.write_text("WScript.Sleep 1000\r\n", encoding="utf-8")
+    pid = os.getpid()
+    bat_file = temp_dir / f"handwritesim_updater_{pid}.bat"
+    # 500ms 无窗口延时脚本（wscript 为 windows GUI 子系统，不分配任何终端控制台）
+    sleep_vbs = temp_dir / f"handwritesim_sleep_{pid}.vbs"
+    sleep_vbs.write_text("WScript.Sleep 500\r\n", encoding="utf-8")
+    launcher_vbs = temp_dir / f"handwritesim_launcher_{pid}.vbs"
 
     bat_content = build_updater_bat_content(
-        Path(new_file_path), target_exe_path, Path(new_file_path), sleep_vbs
+        Path(new_file_path), target_exe_path, Path(new_file_path), sleep_vbs, launcher_vbs
     )
     bat_file.write_text(bat_content, encoding="utf-8")
 
-    creationflags = 0
-    if sys.platform == "win32":
-        creationflags = subprocess.CREATE_NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+    # 通过 WScript.Shell.Run 以后台隐藏模式 (0 = vbHide) 启动批处理，
+    # 彻底杜绝终端控制台黑框弹出，且完全独立于当前主进程。
+    launcher_code = (
+        f'Set WshShell = CreateObject("WScript.Shell")\r\n'
+        f'WshShell.Run "cmd.exe /c """"{bat_file}""""", 0, False\r\n'
+    )
+    launcher_vbs.write_text(launcher_code, encoding="utf-8")
 
     subprocess.Popen(
-        ["cmd.exe", "/c", str(bat_file)],
-        shell=False,
-        creationflags=creationflags,
+        ["wscript.exe", "//B", "//Nologo", str(launcher_vbs)],
         close_fds=True,
     )
