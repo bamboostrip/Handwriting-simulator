@@ -22,6 +22,7 @@ from handwritesim.core.updater import (
     set_auto_check_enabled,
     set_skipped_version,
     check_for_updates,
+    html_release_body_to_text,
     trim_release_notes_markdown,
 )
 from handwritesim.gui.about_dialog import AboutDialog
@@ -144,6 +145,117 @@ def test_check_for_updates_ignores_zip_only(monkeypatch) -> None:
     assert info.version == "0.3.2"
     assert info.asset_name == ""
     assert info.asset_url == ""
+
+
+def test_check_for_updates_fallback_to_atom_on_api_403(monkeypatch) -> None:
+    """当 GitHub REST API 报 403 频次超限时，自动降级至 Atom 订阅源 + expanded_assets。"""
+    import urllib.error
+
+    atom_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>v0.3.3</title>
+    <link rel="alternate" href="https://github.com/bamboostrip/Handwriting-simulator/releases/tag/v0.3.3"/>
+    <content type="html">&lt;h2&gt;更新内容&lt;/h2&gt;&lt;p&gt;修复若干问题&lt;/p&gt;&lt;h2&gt;下载说明&lt;/h2&gt;&lt;p&gt;忽略内容&lt;/p&gt;</content>
+  </entry>
+</feed>
+"""
+    expanded_assets_html = """
+    <div>
+      <a href="/bamboostrip/Handwriting-simulator/releases/download/v0.3.3/HandWriteSim-windows-x86_64.exe">exe</a>
+      <a href="/bamboostrip/Handwriting-simulator/releases/download/v0.3.3/HandWriteSim-linux-x86_64.zip">zip</a>
+    </div>
+"""
+
+    class MockAtomResponse:
+        def __init__(self, data: str, url: str = "") -> None:
+            self._data = data.encode("utf-8")
+            self._url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, *args):
+            return self._data
+
+        def geturl(self):
+            return self._url
+
+    def fake_urlopen(req, timeout=5.0):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.github.com" in url:
+            # 模拟 403 Rate Limit Exceeded
+            raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+        elif "releases.atom" in url:
+            return MockAtomResponse(atom_xml, url)
+        elif "expanded_assets" in url:
+            return MockAtomResponse(expanded_assets_html, url)
+        raise urllib.error.URLError("Not found")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    info = check_for_updates("0.3.1")
+    assert info is not None
+    assert info.version == "0.3.3"
+    assert info.tag_name == "v0.3.3"
+    assert "## 更新内容" in info.body
+    assert "修复若干问题" in info.body
+    assert "下载说明" not in info.body
+    assert info.asset_name == "HandWriteSim-windows-x86_64.exe"
+    assert "HandWriteSim-windows-x86_64.exe" in info.asset_url
+
+
+def test_check_for_updates_fallback_to_redirect_when_atom_fails(monkeypatch) -> None:
+    """当 API 和 Atom 均失败时，自动降级至网页 302 重定向探测最新 Tag。"""
+    import urllib.error
+
+    class MockRedirectResponse:
+        def __init__(self, url: str) -> None:
+            self._url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, *args):
+            return b""
+
+        def geturl(self):
+            return self._url
+
+    def fake_urlopen(req, timeout=5.0):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.github.com" in url:
+            raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+        elif "releases.atom" in url:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        elif "releases/latest" in url:
+            return MockRedirectResponse("https://github.com/bamboostrip/Handwriting-simulator/releases/tag/v0.3.4")
+        elif "expanded_assets" in url:
+            return MockRedirectResponse("https://github.com/bamboostrip/Handwriting-simulator/releases/expanded_assets/v0.3.4")
+        raise urllib.error.URLError("Not found")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    info = check_for_updates("0.3.1")
+    assert info is not None
+    assert info.version == "0.3.4"
+    assert info.tag_name == "v0.3.4"
+
+
+def test_html_release_body_to_text() -> None:
+    html_src = "<h2>更新内容</h2><p>第一项</p><ul><li>条目一</li><li>条目二</li></ul><h2>下载说明</h2><p>冗余</p>"
+    res = html_release_body_to_text(html_src)
+    assert "## 更新内容" in res
+    assert "第一项" in res
+    assert "- 条目一" in res
+    assert "- 条目二" in res
+    assert "下载说明" not in res
 
 
 def test_trim_release_notes_markdown() -> None:

@@ -173,7 +173,7 @@ class AboutDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(
                 self,
                 "检查更新失败",
-                "无法连接至 GitHub Releases API，请检查网络或稍后重试。",
+                "无法连接至 GitHub 获取版本信息，请检查网络连接或稍后重试。",
             )
             return
 

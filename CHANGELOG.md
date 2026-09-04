@@ -11,6 +11,18 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-04
+
+### Fixed
+
+- **版本检查多级容灾降级（彻底解决 GitHub API 403 限流与连接失败）**：
+  GitHub REST API 对未鉴权 IP 有 60 次/小时频次限制，开发测试或共享代理出口 IP
+  极易触发 `HTTP 403: rate limit exceeded` 导致检查更新报无法连接。现对齐 Rust 版引入多级容灾：
+  1. 优先查询 GitHub REST API；
+  2. API 受限或网络超时时，自动无缝降级至 GitHub Releases Atom 订阅源 + expanded_assets 资产页（走 github.com 网页域，免 API 频次限制）；
+  3. 仍失败时通过网页 302 重定向探测最新 Tag；
+  同时优化关于窗口状态文案，并新增单元测试锁定容灾降级逻辑。
+
 ## [0.4.2] - 2026-09-04
 
 ### Fixed

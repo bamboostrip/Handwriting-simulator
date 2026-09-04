@@ -6,18 +6,24 @@
 
 from __future__ import annotations
 
+import html
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 import threading
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 
 from PyQt6.QtCore import QSettings
+
+logger = logging.getLogger(__name__)
 
 GITHUB_OWNER = "bamboostrip"
 GITHUB_REPO = "Handwriting-simulator"
@@ -26,6 +32,10 @@ GITHUB_API_LATEST_RELEASE = (
 )
 GITHUB_REPO_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
 RUST_REPO_URL = "https://github.com/bamboostrip/Handwriting-sim-rs"
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 _SETTINGS_ORGANIZATION = "HandwritingSimulator"
 _SETTINGS_APPLICATION = "Updater"
@@ -133,23 +143,115 @@ def set_skipped_version(version: str) -> None:
     settings.setValue(_KEY_SKIPPED_VERSION, version)
 
 
-def check_for_updates(
+class _HTMLToMarkdown(HTMLParser):
+    """简易 HTML -> Markdown/纯文本转换器，只保留首个小节并规范化。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.result: list[str] = []
+        self.h2_count = 0
+        self.stop = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.stop:
+            return
+        if tag == "h2":
+            self.h2_count += 1
+            if self.h2_count > 1:
+                self.stop = True
+                return
+            self.result.append("\n\n## ")
+        elif tag == "h3":
+            self.result.append("\n\n### ")
+        elif tag == "h4":
+            self.result.append("\n\n#### ")
+        elif tag == "li":
+            self.result.append("\n- ")
+        elif tag == "code":
+            self.result.append("`")
+        elif tag == "br":
+            self.result.append("\n")
+        elif tag in ("p", "div", "ul", "ol", "table", "tr", "blockquote", "pre", "section"):
+            self.result.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.stop:
+            return
+        if tag == "code":
+            self.result.append("`")
+        elif tag in ("p", "div", "h2", "h3", "h4", "li"):
+            self.result.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self.stop:
+            return
+        self.result.append(data)
+
+
+def html_release_body_to_text(raw_html: str) -> str:
+    """将 Atom 订阅源中的 Release 正文 HTML 转为 Markdown/纯文本，并截去后续样板。"""
+    parser = _HTMLToMarkdown()
+    parser.feed(html.unescape(raw_html))
+    text = "".join(parser.result)
+    lines = [l.rstrip() for l in text.splitlines()]
+    merged: list[str] = []
+    pending_bullet = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "-":
+            pending_bullet = True
+            continue
+        if not stripped:
+            if not pending_bullet and (not merged or merged[-1] != ""):
+                merged.append("")
+            continue
+        if pending_bullet:
+            merged.append(f"- {stripped}")
+            pending_bullet = False
+        else:
+            merged.append(stripped)
+    return "\n".join(merged).strip()
+
+
+def _attach_expanded_assets(
+    repo_url: str,
+    tag_name: str,
+    timeout: float = 6.0,
+) -> tuple[str, str, int]:
+    """从 Releases expanded_assets 页面提取 Windows .exe 单文件直链。"""
+    try:
+        url = f"{repo_url}/releases/expanded_assets/{tag_name}"
+        req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            html_text = resp.read().decode("utf-8", errors="replace")
+
+        matches = re.findall(
+            r'href=["\'](/[^"\']+/releases/download/[^"\']+)["\']',
+            html_text,
+        )
+        exe_assets: list[tuple[str, str]] = []
+        for path in matches:
+            filename = os.path.basename(path)
+            if filename.lower().endswith(".exe"):
+                download_url = f"https://github.com{path}" if path.startswith("/") else path
+                exe_assets.append((filename, download_url))
+
+        for name, d_url in exe_assets:
+            if "windows" in name.lower():
+                return name, d_url, 0
+        if exe_assets:
+            return exe_assets[0][0], exe_assets[0][1], 0
+    except Exception as exc:
+        logger.debug("attach_expanded_assets 获取直链失败: %s", exc)
+    return "", "", 0
+
+
+def _fetch_from_api(
+    api_url: str,
     current_version: str,
-    timeout: float = 5.0,
-    check_all: bool = False,
-    api_url: str = GITHUB_API_LATEST_RELEASE,
+    timeout: float,
 ) -> UpdateInfo | None:
-    """向 GitHub API 查询最新发布版本。
-
-    Args:
-        current_version: 当前软件版本号（如 "0.3.1"）
-        timeout: 网络请求超时时间（秒）
-        check_all: 是否忽略版本比较强制返回最新 Release 信息（用于关于界面查询）
-        api_url: API 请求地址
-
-    Returns:
-        若有更新（或 check_all=True）且查询成功返回 UpdateInfo，否则返回 None。
-    """
+    """第 1 级：查询 GitHub REST API。"""
     try:
         req = urllib.request.Request(
             api_url,
@@ -164,13 +266,9 @@ def check_for_updates(
         tag_name = data.get("tag_name", "")
         latest_version = clean_version(tag_name)
         title = data.get("name", "") or tag_name
-        # 软件内只展示更新介绍，下载说明等样板在弹窗里没有意义（对齐 Rust 版裁剪）
         body = trim_release_notes_markdown(data.get("body", "") or "暂无更新说明。")
         html_url = data.get("html_url", GITHUB_REPO_URL)
 
-        # 只匹配单文件升级包（.exe）：自动更新直接下载单文件覆盖替换，
-        # 不再走便携 zip（zip 需解压组装，无法原地替换）。若 Release 中没有
-        # 单文件资产则 asset_url 为空，调用方回退到浏览器手动下载。
         assets = data.get("assets", [])
         asset_name = ""
         asset_url = ""
@@ -178,13 +276,13 @@ def check_for_updates(
 
         for a in assets:
             name = a.get("name", "")
-            if name.endswith(".exe"):
-                asset_name = name
-                asset_url = a.get("browser_download_url", "")
-                asset_size = a.get("size", 0)
-                break
+            if name.lower().endswith(".exe"):
+                if not asset_name or "windows" in name.lower():
+                    asset_name = name
+                    asset_url = a.get("browser_download_url", "")
+                    asset_size = a.get("size", 0)
 
-        info = UpdateInfo(
+        return UpdateInfo(
             version=latest_version,
             tag_name=tag_name,
             title=title,
@@ -194,13 +292,136 @@ def check_for_updates(
             asset_url=asset_url,
             asset_size=asset_size,
         )
+    except Exception as exc:
+        logger.warning("GitHub REST API 检查更新失败 (%s)，将尝试备用源", exc)
+        return None
 
-        if check_all or compare_versions(latest_version, current_version) > 0:
+
+def _fetch_from_atom_feed(
+    repo_url: str,
+    current_version: str,
+    timeout: float = 8.0,
+) -> UpdateInfo | None:
+    """第 2 级：查询 Releases Atom 订阅源（免 API 60次/小时限制）。"""
+    try:
+        atom_url = f"{repo_url}/releases.atom"
+        req = urllib.request.Request(atom_url, headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            xml_text = resp.read().decode("utf-8", errors="replace")
+
+        root = ET.fromstring(xml_text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entry = root.find("atom:entry", ns)
+        if entry is None:
+            return None
+
+        link_el = entry.find("atom:link[@rel='alternate']", ns)
+        if link_el is None:
+            link_el = entry.find("atom:link", ns)
+        link = link_el.get("href", "") if link_el is not None else ""
+
+        title_el = entry.find("atom:title", ns)
+        title_text = title_el.text.strip() if title_el is not None and title_el.text else ""
+
+        if "/releases/tag/" in link:
+            tag_name = link.rsplit("/", 1)[-1]
+        else:
+            tag_name = title_text
+
+        version = clean_version(tag_name)
+        content_el = entry.find("atom:content", ns)
+        raw_content = content_el.text if content_el is not None and content_el.text else ""
+        body = html_release_body_to_text(raw_content) or "暂无更新说明。"
+        html_url = link or f"{repo_url}/releases/tag/{tag_name}"
+
+        info = UpdateInfo(
+            version=version,
+            tag_name=tag_name,
+            title=title_text or f"手写模拟器 {tag_name}",
+            body=body,
+            html_url=html_url,
+        )
+
+        asset_name, asset_url, asset_size = _attach_expanded_assets(repo_url, tag_name, timeout=timeout)
+        info.asset_name = asset_name
+        info.asset_url = asset_url
+        info.asset_size = asset_size
+
+        return info
+    except Exception as exc:
+        logger.warning("Releases Atom 订阅源查询失败 (%s)，将尝试网页重定向探测", exc)
+        return None
+
+
+def _fetch_from_web_redirect(
+    repo_url: str,
+    current_version: str,
+    timeout: float = 6.0,
+) -> UpdateInfo | None:
+    """第 3 级：网页 302 重定向探测最新 Tag（兜底方案，无 API 限制）。"""
+    try:
+        url = f"{repo_url}/releases/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_url = resp.geturl()
+
+        if "/releases/tag/" in final_url:
+            tag_part = final_url.split("/releases/tag/", 1)[-1]
+            tag_name = re.split(r"[/?#]", tag_part)[0]
+            version = clean_version(tag_name)
+            info = UpdateInfo(
+                version=version,
+                tag_name=tag_name,
+                title=f"手写模拟器 {tag_name}",
+                body=f"发现新版本发布！请前往 GitHub Release 页面查看：\n\n{final_url}",
+                html_url=final_url,
+            )
+            asset_name, asset_url, asset_size = _attach_expanded_assets(repo_url, tag_name, timeout=timeout)
+            info.asset_name = asset_name
+            info.asset_url = asset_url
+            info.asset_size = asset_size
             return info
+    except Exception as exc:
+        logger.warning("网页重定向探测失败: %s", exc)
+    return None
+
+
+def check_for_updates(
+    current_version: str,
+    timeout: float = 5.0,
+    check_all: bool = False,
+    api_url: str = GITHUB_API_LATEST_RELEASE,
+    repo_url: str = GITHUB_REPO_URL,
+) -> UpdateInfo | None:
+    """多级容灾检查 GitHub 发布版本。
+
+    优先级：
+    1. GitHub REST API（结构化信息最全）
+    2. Releases Atom 订阅源 + expanded_assets 资产页（github.com 域，免 API 频次限制）
+    3. 网页 302 重定向探测（无 API 限制，兜底获取最新 Tag）
+
+    Args:
+        current_version: 当前软件版本号（如 "0.3.1"）
+        timeout: 网络请求超时时间（秒）
+        check_all: 是否忽略版本比较强制返回最新 Release 信息（用于关于界面查询）
+        api_url: API 请求地址
+        repo_url: GitHub 仓库页面主地址
+
+    Returns:
+        若有更新（或 check_all=True）且查询成功返回 UpdateInfo，否则返回 None。
+    """
+    info = _fetch_from_api(api_url, current_version, timeout)
+    if info is None and repo_url:
+        info = _fetch_from_atom_feed(repo_url, current_version, timeout)
+    if info is None and repo_url:
+        info = _fetch_from_web_redirect(repo_url, current_version, timeout)
+
+    if info is None:
         return None
 
-    except Exception:
-        return None
+    if check_all or compare_versions(info.version, current_version) > 0:
+        return info
+    return None
 
 
 def download_file(
