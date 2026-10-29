@@ -28,5 +28,6 @@ _*.png
 
 .superpowers/
 
-# 论坛发布帖文案：本地运营文档，不入库
-docs/52pj-发布帖.md
+# 论坛发布帖文案与配图：本地运营文档，不入库
+docs/52pj-*.md
+docs/images/52pj-*/

@@ -1070,18 +1070,40 @@ def process_tables_on_page(
             located = flat_matches[i] if i < len(flat_matches) else None
             # 命中字符：擦除原印刷字（保留表格线）；字号取命中字符校准值
             font_size = 0
+            ink_y0 = ink_y1 = None
             if located is not None:
                 erase_char_boxes(arr, chars, located.char_idxs, 2)
                 refs = [chars[k] for k in located.char_idxs if 0 <= k < len(chars)]
                 font_size = _resolve_font_size_px(refs, scale) if refs else 0
+                # 落笔纵向基准取命中字符的**紧包围盒**：infer_cell_rects 的行框是
+                # loose 行高（≈58px 而字形仅 ~33px），而引擎从区域顶开始排版，
+                # 按 loose 行框会让手写整体上移十余像素、压到单元格上边框
+                #（真实 docx 实测）。横向仍用单元格矩形（字形前进宽度）。
+                spans = [c.ink_v_span() for c in refs]
+                if spans:
+                    ink_y0 = min(a for a, _ in spans)
+                    ink_y1 = max(b for _, b in spans)
             if font_size <= 0 and cell.sz_half_pt:
                 # 未命中或校准失败：回退 w:sz（半磅）→ 像素
                 font_size = int(round((cell.sz_half_pt / 2.0) * scale))
-            # 区域矩形：命中 bbox 外扩（水平 6 / 竖直 4）；推断矩形已内缩
-            if located is not None:
-                region_rect = RectPx(rect.x - 6, rect.y - 4, rect.w + 12, rect.h + 8)
+            # 区域矩形：命中格水平外扩 6、纵向以字形为基准外扩 6（含 bbox pad 2）；
+            # 未命中格（带推断）沿用推断矩形（已按行/列带内缩）
+            if located is not None and ink_y0 is not None and ink_y1 is not None:
+                top = int(round(ink_y0)) - 6
+                region_rect = RectPx(rect.x - 6, top, rect.w + 12, int(round(ink_y1 - ink_y0)) + 12)
             else:
                 region_rect = rect
+                # 未定位格（单字格/空文本格走带推断）的印刷字仍在底图上：按
+                # 「字形中心落在单元格矩形内」逐字擦除，否则会出现印刷字与手写
+                # 字重叠的双影（单字格不参与匹配是防跨页误匹配的既定规则）。
+                # 用中心点判定而非整体包含：字形包围盒可能略越出内缩后的矩形。
+                inside = [
+                    k for k, c in enumerate(chars)
+                    if rect.x <= (c.min_x + c.max_x) / 2 <= rect.x + rect.w
+                    and rect.y <= (c.min_y + c.max_y) / 2 <= rect.y + rect.h
+                ]
+                if inside:
+                    erase_char_boxes(arr, chars, inside, 2)
             # 钳制到图像内（框可能越出页边）
             rx = max(region_rect.x, 0)
             ry = max(region_rect.y, 0)

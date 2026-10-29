@@ -470,10 +470,30 @@ def test_process_tables_builds_regions_and_erases() -> None:
     assert (outer.x, outer.y, outer.w, outer.h) == (94, 94, 252, 32)
 
 
-def _cell_run(text: str, highlight: str | None = None):
-    from handwritesim.core.docx_io import CellRun
+def test_process_tables_region_vertical_anchor_uses_ink_span() -> None:
+    """命中格的区域纵向以字形紧包围盒为基准，而不是 loose 行高框。
 
-    return CellRun(text=text, highlight=highlight)
+    真实 docx 实测：pdfium 的 loose 框是行高（约 58px），字形仅约 33px；
+    渲染引擎从区域顶部起笔，区域若按 loose 行框生成，手写会整体上移十余像素、
+    压住单元格上边框。区域纵向应贴合字形（tight ± 4），手写才落在原文字位置。
+    """
+    stream, views = _stream_of([[_parsed_cell("甲乙", col_start=0)]])
+    # loose y=100..140（行高框），tight y=110..130（字形本体）
+    chars = [
+        ExtractedChar("甲", 100.0, 100.0, 120.0, 140.0, 10.5, 20.0, 110.0, 130.0),
+        ExtractedChar("乙", 120.0, 100.0, 140.0, 140.0, 10.5, 20.0, 110.0, 130.0),
+    ]
+    arr = _blank_arr()
+    result = process_tables_on_page(stream, views, chars, 0, 1, 200, arr, {}, [2])
+
+    region = result.regions[0]
+    assert region.y == 104, f"纵向应贴合字形（tight 110 - 6），实际 {region.y}"
+    assert region.h == 32, f"高度应为字形 20 + 上下 12，实际 {region.h}"
+    assert (region.y + region.h) == 136
+    # 横向仍按单元格矩形外扩 6（字形前进宽度）
+    assert region.x == 92 and region.w == 56
+    # 字形像素被擦净
+    assert (arr[120, 110] == 255).all()
 
 
 def test_process_tables_inferred_rect_not_expanded_and_font_fallback() -> None:
@@ -507,6 +527,35 @@ def test_process_tables_inferred_rect_not_expanded_and_font_fallback() -> None:
     # 无命中字符 → 字号回退 w:sz（21 半磅 = 10.5pt）→ 10.5×200/72 → 29
     assert ding.font_size == 29
     assert ding.role_id == 0 and ding.highlight is None
+
+
+def test_inferred_cell_erases_its_printed_glyph() -> None:
+    """未定位格（单字格走带推断）也要擦掉底图印刷字，否则会出现双影。
+
+    单字格不参与匹配是防跨页误匹配的既定规则，但它的印刷字仍在底图上；
+    若只生成区域不擦字，手写字会叠在印刷字上（真实 docx 实测可见双影）。
+    这里按「字形中心落在单元格矩形内」逐字擦除。
+    """
+    stream, views = _stream_of([
+        [_parsed_cell("甲乙", col_start=0), _parsed_cell("丙", col_start=1)],
+        [_parsed_cell("丁丁", col_start=0), _parsed_cell("戊戊", col_start=1)],
+    ])
+    chars = (
+        grid_chars("甲乙", 100.0, 100.0)
+        + grid_chars("丙", 300.0, 100.0)      # 单字格：不参与匹配
+        + grid_chars("丁丁", 100.0, 200.0)
+        + grid_chars("戊戊", 300.0, 200.0)    # 提供第 1 列的列带
+    )
+    arr = _blank_arr()
+    arr[100:120, 300:320] = 0  # 「丙」的印刷字形
+    arr[200:220, 300:340] = 0  # 「戊戊」的印刷字形（会被正常擦除）
+
+    result = process_tables_on_page(stream, views, chars, 0, 1, 200, arr, {}, [2])
+
+    texts = [r.text for r in result.regions]
+    assert "丙" in texts, f"单字格应由行列带推断出区域，实际 {texts}"
+    assert (arr[110, 305] == 255).all(), "单字格的印刷字形也应被擦除（避免双影）"
+    assert (arr[210, 305] == 255).all(), "命中格的印刷字形照常擦除"
 
 
 def test_process_tables_skips_gray_and_continue_cells() -> None:
