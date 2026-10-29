@@ -135,14 +135,20 @@ def test_docx_to_pdf_falls_back_to_libreoffice(monkeypatch, tmp_path: Path) -> N
     assert doc_render.docx_to_pdf(docx, tmp_path) == pdf_expected
 
 
-def test_docx_to_pdf_raises_when_conversion_produces_nothing(monkeypatch, tmp_path: Path) -> None:
-    """LibreOffice 跑了但没产出 PDF（崩溃/超时）时仍要报错，不能返回不存在的路径。"""
+def test_docx_to_pdf_reports_converter_failure_distinctly(monkeypatch, tmp_path: Path) -> None:
+    """LibreOffice 找到了但没产出 PDF（崩溃/超时/被拦截）时，报错要区别于「未安装」。"""
     monkeypatch.setattr(doc_render.sys, "platform", "linux")
-    monkeypatch.setattr(doc_render, "find_soffice", lambda: _fake_soffice(tmp_path))
-    monkeypatch.setattr(doc_render, "_soffice_candidates", lambda: [Path("/usr/bin/soffice")])
+    exe = _fake_soffice(tmp_path)
+    monkeypatch.setattr(doc_render, "find_soffice", lambda: exe)
     monkeypatch.setattr(doc_render.subprocess, "run", lambda cmd, **kw: None)
 
     docx = tmp_path / "a.docx"
     docx.write_bytes(b"stub")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         doc_render.docx_to_pdf(docx, tmp_path)
+
+    message = str(excinfo.value)
+    assert "已找到 LibreOffice，但 DOCX 转 PDF 失败" in message
+    assert str(exe) in message
+    assert "未找到可用的" not in message, "已找到转换器时不得再报「未安装」"
+    assert "另存为 PDF" in message

@@ -275,6 +275,70 @@ def test_erase_char_boxes_clamps_to_image_bounds() -> None:
     assert (arr[0, 0] == 0).all(), "只擦包围盒内，左上角保持不变"
 
 
+def test_erase_char_boxes_uses_tight_span_to_spare_table_lines() -> None:
+    """loose 框是「行高」，Word 表格行高紧贴边框时会盖住表格线。
+
+    真实文档实测：``Table Grid`` 样式的行高≈行距，loose 框上下各压住一条
+    边框，按 loose 擦会把整行边框擦成缺口。擦除必须用紧包围盒（≈字形高度）。
+    """
+    arr = _blank_arr(300, 200)
+    arr[40, 20:280] = 0   # 上方表格线（y=40）
+    arr[80, 20:280] = 0   # 下方表格线（y=80）
+    # 文字 loose 框 y=40..80（正好压住两条线），紧框 y=52..68（字形本体）
+    chars = [ExtractedChar("字", 60.0, 40.0, 100.0, 80.0, 12.0, 12.0, 52.0, 68.0)]
+
+    erase_char_boxes(arr, chars, [0], 2)
+
+    assert (arr[60, 80] == 255).all(), "字形区域应被擦白"
+    assert (arr[40, 80] == 0).all(), "loose 框盖住的上表格线必须保留"
+    assert (arr[80, 80] == 0).all(), "loose 框盖住的下表格线必须保留"
+
+
+def test_erase_char_boxes_falls_back_to_loose_when_tight_missing() -> None:
+    """未提供紧包围盒（旧数据/测试构造）时回退 loose，行为不变。"""
+    arr = _blank_arr(120, 120)
+    arr[40:60, 40:60] = 0
+    chars = [ExtractedChar("字", 40.0, 40.0, 60.0, 60.0, 12.0, 10.0)]
+    erase_char_boxes(arr, chars, [0], 2)
+    assert (arr[50, 50] == 255).all()
+
+
+def test_tag_erase_box_ignores_outlier_loose_boxes() -> None:
+    """标签擦除框不能被标点的异常 loose 框撑大。
+
+    真实文档：``{{打印:张三}}`` 里的 ``{ } :`` 在 Word/LibreOffice 导出的 PDF
+    中字体矩阵异常（font_size 221pt），loose 框纵向撑到 277..448（跨整张表格），
+    按 loose 擦标签会把该列上下四条表格线全部抹掉。修复：纵向用紧包围盒 +
+    剔除高度离群字。
+    """
+    arr = _blank_arr(300, 200)
+    arr[60, 0:300] = 0    # 上表格线
+    arr[150, 0:300] = 0   # 下表格线
+    # 标签 {{手写:答案}}：花括号 loose=60..150（跨两条线），tight=95..125
+    chars: list[ExtractedChar] = [
+        ExtractedChar("{", 10.0, 60.0, 22.0, 150.0, 221.0, 30.0, 95.0, 125.0),
+        ExtractedChar("{", 22.0, 60.0, 34.0, 150.0, 221.0, 30.0, 95.0, 125.0),
+        ExtractedChar("手", 34.0, 90.0, 64.0, 130.0, 20.0, 30.0, 95.0, 125.0),
+        ExtractedChar("写", 64.0, 90.0, 94.0, 130.0, 20.0, 30.0, 95.0, 125.0),
+        ExtractedChar(":", 94.0, 60.0, 102.0, 150.0, 221.0, 30.0, 100.0, 120.0),
+        ExtractedChar("答", 102.0, 90.0, 132.0, 130.0, 20.0, 30.0, 95.0, 125.0),
+        ExtractedChar("案", 132.0, 90.0, 162.0, 130.0, 20.0, 30.0, 95.0, 125.0),
+        ExtractedChar("}", 162.0, 60.0, 174.0, 150.0, 221.0, 30.0, 95.0, 125.0),
+        ExtractedChar("}", 174.0, 60.0, 186.0, 150.0, 221.0, 30.0, 95.0, 125.0),
+    ]
+
+    regions = extract_pdf_page_tags(chars, 0, 200, 300, 200, arr)
+
+    assert len(regions) == 1
+    region = regions[0]
+    assert region.y >= 90 and region.y + region.h <= 132, (
+        f"标签区域纵向应贴合字形（~95..125），实际 y={region.y} h={region.h}"
+    )
+    assert (arr[60, 100] == 0).all(), "上表格线不得被标签擦除框抹掉"
+    assert (arr[150, 100] == 0).all(), "下表格线不得被标签擦除框抹掉"
+    assert (arr[110, 40] == 255).all(), "标签文字本身要被擦白"
+
+
 # ---------------------------------------------------------------------------
 # 表内高亮框分流 / 表内标签排重
 # ---------------------------------------------------------------------------

@@ -354,6 +354,11 @@ def erase_char_boxes(
 
     arr 为 numpy uint8 HxWx3（就地切片赋值 255）。整框擦白会把表格线一起抹掉，
     故此路径只在单元格内逐字符擦除；pad 用于吃掉文字抗锯齿边缘。
+
+    纵向范围取**紧包围盒**（``ExtractedChar.ink_v_span``）而非 loose 行高框：
+    Word 表格行高常常等于行高，loose 框会上下各盖住一条表格线，按 loose 擦
+    会把边框擦成缺口（真实文档实测）。横向仍用 loose（= 字前进宽度），保证
+    字形左右抗锯齿也被清干净。
     """
     height, width = arr.shape[:2]
     for i in idxs:
@@ -362,8 +367,9 @@ def erase_char_boxes(
         c = chars[i]
         x0 = max(math.floor(c.min_x) - pad, 0)
         x1 = min(math.ceil(c.max_x) + pad, width - 1)
-        y0 = max(math.floor(c.min_y) - pad, 0)
-        y1 = min(math.ceil(c.max_y) + pad, height - 1)
+        ink_y0, ink_y1 = c.ink_v_span()
+        y0 = max(math.floor(ink_y0) - pad, 0)
+        y1 = min(math.ceil(ink_y1) + pad, height - 1)
         if x1 < x0 or y1 < y0:
             continue
         arr[y0:y1 + 1, x0:x1 + 1] = 255
@@ -534,7 +540,12 @@ class ExtractedChar:
     """PDF 提取的单个字符及其在页面像素空间的位置与字号。
 
     glyph_h_pt 为紧包围盒（tight charbox）的字符高度（点），用于在
-    raw 字号失真（嵌入字体矩阵放大等）时回退估计真实字号。
+    raw 字号失真（嵌入字体矩阵放大等）时回退估计真实字号；
+    tight_min_y / tight_max_y 为紧包围盒的像素纵向范围（原点左上）。
+
+    **注意 loose 与 tight 的区别**：pdfium 的 loose 包围盒高度是「行高」，
+    Word 表格行高紧贴边框时 loose 框会盖住上下表格线；擦字必须用 tight
+    框（≈字形高度），否则会把表格线一起抹掉（真实文档实测复现）。
     """
 
     ch: str
@@ -544,6 +555,15 @@ class ExtractedChar:
     max_y: float
     font_size_pt: float
     glyph_h_pt: float = 0.0
+    # 紧包围盒纵向范围（像素）；0 表示未提供，擦除时回退 loose
+    tight_min_y: float = 0.0
+    tight_max_y: float = 0.0
+
+    def ink_v_span(self) -> tuple[float, float]:
+        """擦除用的纵向范围：优先紧包围盒（字形），退化时用 loose。"""
+        if self.tight_max_y > self.tight_min_y:
+            return self.tight_min_y, self.tight_max_y
+        return self.min_y, self.max_y
 
 
 def _is_full_width_char(ch: str) -> bool:
@@ -638,9 +658,15 @@ def extract_pdf_page_chars(page, dpi: int) -> list[ExtractedChar]:
             py1 = (page_h_pt - top) * scale
             py2 = (page_h_pt - bottom) * scale
             min_y, max_y = sorted((py1, py2))
+            # 紧包围盒纵向范围：擦除时只清字形高度，避开紧贴的表格线（见
+            # ExtractedChar 的 loose/tight 说明）。坐标换算与 loose 同口径。
+            t_py1 = (page_h_pt - t_top) * scale
+            t_py2 = (page_h_pt - t_bottom) * scale
+            tight_min_y, tight_max_y = sorted((t_py1, t_py2))
             chars.append(ExtractedChar(
                 ch, min_x, min_y, max_x, max_y,
                 font_size_pt, abs(t_top - t_bottom),
+                tight_min_y, tight_max_y,
             ))
         return chars
     finally:
@@ -778,26 +804,37 @@ def extract_pdf_page_tags(
 
     regions: list[TextRegion] = []
     for m in matches:
-        min_x = float("inf")
-        max_x = float("-inf")
-        min_y = float("inf")
-        max_y = float("-inf")
+        x_spans: list[tuple[float, float]] = []
+        y_spans: list[tuple[float, float]] = []
         tag_chars: list[ExtractedChar] = []
-        has_valid_bounds = False
 
         for k in range(m.start_char_idx, m.end_char_idx + 1):
             if k < len(page_chars):
                 e = page_chars[k]
                 if e.max_x > e.min_x and e.max_y > e.min_y:
-                    min_x = min(min_x, e.min_x)
-                    max_x = max(max_x, e.max_x)
-                    min_y = min(min_y, e.min_y)
-                    max_y = max(max_y, e.max_y)
+                    x_spans.append((e.min_x, e.max_x))
+                    # 纵向用字形紧包围盒：loose 框是「行高」，而某些标点/符号
+                    # （如 {{ }} 里的 { } :）在 Word/LibreOffice 导出的 PDF 中
+                    # 字体矩阵异常，loose 框会撑到整行甚至整页——按 loose 擦标签
+                    # 会把整条表格线抹掉（真实文档实测）。
+                    y_spans.append(e.ink_v_span())
                     tag_chars.append(e)
-                    has_valid_bounds = True
 
-        if not has_valid_bounds:
+        if not x_spans or not y_spans:
             continue
+
+        # 高度离群的字形剔除（防御异常字体矩阵）：按中位数 2 倍为界，
+        # 全部离群时退回全量，保证仍能擦到字。
+        heights = sorted(b - a for a, b in y_spans if b > a)
+        median_h = heights[len(heights) // 2] if heights else 0.0
+        usable = [(a, b) for a, b in y_spans if median_h <= 0.0 or (b - a) <= median_h * 2.0]
+        if not usable:
+            usable = y_spans
+
+        min_x = min(a for a, _ in x_spans)
+        max_x = max(b for _, b in x_spans)
+        min_y = min(a for a, _ in usable)
+        max_y = max(b for _, b in usable)
 
         x_px = int(round(min_x))
         y_px = int(round(min_y))
@@ -1349,6 +1386,16 @@ def docx_to_pdf(docx_path: str | Path, out_dir: str | Path) -> Path:
             pass
         if pdf_path.exists():
             return pdf_path
+        # 找到了转换器却没产出 PDF：不能再报「未安装」，否则又把排查带偏
+        raise RuntimeError(
+            "已找到 LibreOffice，但 DOCX 转 PDF 失败（未生成 PDF）。\n"
+            f"LibreOffice：{soffice}\n"
+            f"待转换文件：{docx_path}\n"
+            "可能原因与处理：\n"
+            "1. 文档正被占用或受保护——先在 Word / WPS 里关闭该文档；\n"
+            "2. 首次启动 LibreOffice 被安全软件拦截——手动打开一次 LibreOffice 允许后重试；\n"
+            "3. 仍失败时：在 Word / WPS 中「另存为 PDF」，再导入 PDF（推荐）。"
+        )
 
     checked = ["PATH 中的 soffice / libreoffice", *(str(p) for p in _soffice_candidates())]
     if sys.platform == "win32":
