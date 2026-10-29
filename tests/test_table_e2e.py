@@ -131,7 +131,10 @@ def _word_available() -> bool:
 
 
 def _converter_available() -> bool:
-    return _word_available() or bool(shutil.which("soffice") or shutil.which("libreoffice"))
+    """是否有可用的 docx→PDF 转换器（Word COM 或 LibreOffice 默认安装目录）。"""
+    if _word_available():
+        return True
+    return doc_render.find_soffice() is not None
 
 
 _E2E_ENABLED = os.environ.get("HANDWRITE_E2E_DOCX_TABLE", "").strip() in {"1", "true", "yes"}

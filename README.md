@@ -291,6 +291,7 @@ Handwriting-simulator/
     ├── test_docx_tables.py      # 表格结构解析与单元格定位匹配（跨页分割 / 合并格 / 带推断）
     ├── test_table_render.py     # 表格区域生成、字符级擦除、换行签名合并、高亮分流
     ├── test_doc_background.py   # 文档底图（PDF/DOCX 打印预览）与逐页背景
+    ├── test_docx_conversion.py  # docx→PDF 转换器探测（PATH/安装目录/注册表）与失败提示
     ├── test_engine.py           # 引擎接口、校验、参数序列化
     ├── test_engine_fast.py      # FastEngine 渲染与段落路径
     ├── test_gui_consistency.py  # GUI 预览/导出一致性回归
@@ -413,7 +414,7 @@ uv run --extra dev pyinstaller --noconfirm --clean HandWriteSim.spec
 字体 / 背景缺失时静默跳过，不弹窗打断输入；未输入文字但背景就绪时会渲染**纯背景预览**（方便先摆版式再框选），输入停止 300ms 后触发。
 
 **导入 Word 文档底图需要什么环境？**
-PDF 底图开箱即用（内置 pypdfium2 栅格化）；DOCX 底图需要本机装有 Microsoft Word（COM 自动化，仅 Windows）或 LibreOffice（`soffice` 命令）其一。手动改选图片背景时，文档底图状态自动失效。
+PDF 底图开箱即用（内置 pypdfium2 栅格化）；DOCX 底图需要本机装有 Microsoft Word（COM 自动化，仅 Windows）或 LibreOffice 其一。LibreOffice **无需加入 PATH**：程序会依次检查 PATH、各平台默认安装目录（如 `C:\Program Files\LibreOffice\program`、`/Applications/LibreOffice.app/Contents/MacOS`）与 Windows 注册表 `LibreOffice\UNO\InstallPath`；仍找不到时，报错里会列出已检查的位置与解决办法。手动改选图片背景时，文档底图状态自动失效。
 
 **导入时弹出的「检测到高亮」对话框怎么选？**
 - 导入 docx 到正文：选「全部作为手写」则忽略高亮整篇手写；选「打印/手写混排」则高亮文字用手写体、未高亮文字保留打印体。

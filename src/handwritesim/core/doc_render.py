@@ -22,6 +22,7 @@ import math
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
@@ -1217,8 +1218,107 @@ def pdf_to_images(
     return paths
 
 
+def _soffice_candidates() -> list[Path]:
+    """LibreOffice 可执行文件的候选路径（按平台）。
+
+    Windows 版 LibreOffice 安装时**不会**把自己加入 PATH，只查 PATH 会把
+    「已安装」误判成「未安装」（用户实测：已装 LibreOffice 仍提示需要安装）。
+    故除 PATH 外还要探测安装目录与注册表（见 ``find_soffice``）。
+    """
+    if sys.platform == "win32":
+        return [
+            Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+            Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+        ]
+    if sys.platform == "darwin":
+        return [Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")]
+    # Linux / 其他类 Unix：发行版包管理器与 snap / flatpak 的常见落点
+    return [
+        Path("/usr/bin/soffice"),
+        Path("/usr/local/bin/soffice"),
+        Path("/snap/bin/libreoffice"),
+        Path("/opt/libreoffice/program/soffice"),
+    ]
+
+
+def _soffice_from_registry() -> Path | None:
+    """从 Windows 注册表取 LibreOffice 安装目录（默认值即 program 目录）。
+
+    ``HKLM\\SOFTWARE\\LibreOffice\\UNO\\InstallPath`` 的默认值是
+    ``...\\LibreOffice\\program``，据此拼出 ``soffice.exe``；读注册表失败
+    （非 Windows / 无权限 / 未安装）一律返回 None。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover - 仅非 Windows 会走到
+        return None
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for sub in (r"SOFTWARE\LibreOffice\UNO\InstallPath", r"SOFTWARE\WOW6432Node\LibreOffice\UNO\InstallPath"):
+            try:
+                with winreg.OpenKey(root, sub) as key:
+                    install, _ = winreg.QueryValueEx(key, "")
+            except OSError:
+                continue
+            exe = Path(str(install)) / "soffice.exe"
+            if exe.is_file():
+                return exe
+    return None
+
+
+def find_soffice() -> Path | None:
+    """查找 LibreOffice 可执行文件：PATH → 平台常见安装目录 → Windows 注册表。
+
+    对齐 Rust 版 ``find_soffice``（PATH + 两个 Windows 安装目录），并额外补
+    注册表与 macOS/Linux 常见路径：只查 PATH 是「装了却提示没装」的根因。
+    """
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    for candidate in _soffice_candidates():
+        if candidate.is_file():
+            return candidate
+    return _soffice_from_registry()
+
+
+def _run_soffice(soffice: Path, docx_path: Path, out_dir: Path) -> None:
+    """调用 LibreOffice 无头模式把 docx 转 PDF（失败不抛，由调用方按文件判定）。
+
+    使用独立的临时用户配置目录（``-env:UserInstallation``）：用户开着
+    LibreOffice 界面时，默认配置目录被锁，headless 转换会挂起或转交给正在
+    运行的 GUI 实例（可能弹出窗口）。隔离配置后可稳定并发转换。
+    """
+    profile_dir = Path(tempfile.mkdtemp(prefix="handwrite_lo_profile_"))
+    try:
+        subprocess.run(
+            [
+                str(soffice),
+                f"-env:UserInstallation={profile_dir.as_uri()}",
+                "--headless",
+                "--norestore",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(out_dir),
+                str(docx_path),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=300,
+        )
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+
+
 def docx_to_pdf(docx_path: str | Path, out_dir: str | Path) -> Path:
-    """把 DOCX 转成 PDF（Word COM 优先，LibreOffice 兜底）。"""
+    """把 DOCX 转成 PDF（Word COM 优先，LibreOffice 兜底）。
+
+    LibreOffice 查找覆盖 PATH 与各平台默认安装目录（Windows 版不写 PATH），
+    因此「已安装却提示未安装」不会再发生；仍找不到时错误信息给出排查办法。
+    """
     docx_path = Path(docx_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1241,22 +1341,25 @@ def docx_to_pdf(docx_path: str | Path, out_dir: str | Path) -> Path:
         except (OSError, subprocess.TimeoutExpired):
             pass  # Word 未安装或转换失败，继续尝试 LibreOffice
 
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
-    if soffice:
+    soffice = find_soffice()
+    if soffice is not None:
         try:
-            subprocess.run(
-                [soffice, "--headless", "--convert-to", "pdf",
-                 "--outdir", str(out_dir), str(docx_path)],
-                capture_output=True, text=True, timeout=300,
-            )
+            _run_soffice(soffice, docx_path, out_dir)
         except (OSError, subprocess.TimeoutExpired):
             pass
         if pdf_path.exists():
             return pdf_path
 
+    checked = ["PATH 中的 soffice / libreoffice", *(str(p) for p in _soffice_candidates())]
+    if sys.platform == "win32":
+        checked.append("Windows 注册表 LibreOffice\\UNO\\InstallPath")
     raise RuntimeError(
-        "无法把 DOCX 转成打印预览：需要本机安装 Microsoft Word 或 LibreOffice。\n"
-        "也可以先在 Word 里把文档另存为 PDF，再直接导入 PDF。"
+        "无法把 DOCX 转成打印预览：未找到可用的 Microsoft Word 或 LibreOffice。\n"
+        f"已检查：{'、'.join(checked)}。\n"
+        "解决办法（任选其一）：\n"
+        "1. 安装免费的 LibreOffice 后重试（本程序会自动探测默认安装目录）；\n"
+        "2. 在 Word / WPS 中「另存为 PDF」，再导入 PDF——版式最稳，推荐；\n"
+        "3. 已安装但装在非默认目录时，把其 program 目录（含 soffice.exe）加入 PATH 后重启本程序。"
     )
 
 
