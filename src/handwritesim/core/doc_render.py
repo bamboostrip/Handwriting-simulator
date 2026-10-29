@@ -6,9 +6,11 @@ DOCX 的忠实排版需要本机排版引擎：优先借助 Microsoft Word（COM
 再走同一条栅格化链路。都没有时给出明确的安装提示。
 
 自动区域检测（对齐 Rust 版 doc_render.rs）：
-1. 图像高亮底色检测（Word 标准黄色/绿色/青色/粉色等高亮矩形区域）；
-2. 文本占位符标签检测（``{{...}}`` 与 ``【...】``）；
-3. 自动擦除原图上的高亮色块与占位文字为纯白底色，
+1. docx 表格单元格（0.5.0 新增）：按 body 元素流定位表格 → 逐字符擦白印刷字
+   （保留表格线）→ 为每个单元格生成 TextRegion（``table_index`` 标注归属）；
+2. 图像高亮底色检测（Word 标准黄色/绿色/青色/粉色等高亮矩形区域）；
+3. 文本占位符标签检测（``{{...}}`` 与 ``【...】``；表格内的标签只擦除不重复成区）；
+4. 自动擦除原图上的高亮色块与占位文字为纯白底色，
    从 PDF 文本层提取高亮框内的文字、字号、行距与首行缩进，
    返回带 role_id/highlight 绑定的 TextRegion 列表。
 """
@@ -16,16 +18,22 @@ DOCX 的忠实排版需要本机排版引擎：优先借助 Microsoft Word（COM
 from __future__ import annotations
 
 import functools
+import math
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 from PIL import Image
 
 from .models import TextRegion
+
+if TYPE_CHECKING:  # 仅类型检查期导入：避免与 docx_tables 形成运行期循环依赖
+    from .docx_io import BodyElement
+    from .docx_tables import RectPx, TableView
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +247,78 @@ def merge_close_boxes(boxes: list[BoundingBox]) -> list[BoundingBox]:
     return boxes
 
 
+def merge_wrap_line_boxes(
+    boxes: list[BoundingBox], chars: list[ExtractedChar]
+) -> list[BoundingBox]:
+    """换行签名合并：同一句高亮跨行折断时，行尾条纹与下一行行首条纹水平投影零重叠，
+    规则 3 的 40% 重叠要求判不合并 → 一句话被上下切成两个区域。此函数按换行签名
+    「上行条纹是行尾（同行右侧无字符）& 下行条纹是行首（同行左侧无字符）& 同色 &
+    垂直间隙 ≤ 1.5×较小框高」把这类条纹对合并回来；在 merge_close_boxes 之后调用，
+    只处理其漏网的零重叠跨行对。签名用行内字符占位而非页面版心边：对离群字符
+    坐标（如 loose bounds 越界）免疫。
+
+    只对「原始条纹对」做单趟配对，合并结果不再参与后续配对：多行句子（3 条纹
+    以上）的水平重叠行已被规则 3 提前串起，到达这里的基本是 2 条纹短句；若允许
+    联合框继续配对，其高度会让间隙阈值（1.5×较小框高）失真，把上方无关段落
+    整块吞进来（实测复现过），故显式禁止链式合并。
+    """
+    # 无字符流时行尾/行首判定空真，会退化成「同色+垂直邻近即合并」，直接不合并
+    if len(boxes) <= 1 or not chars:
+        return list(boxes)
+
+    result: list[BoundingBox] = []
+    consumed = [False] * len(boxes)
+    for i in range(len(boxes)):
+        if consumed[i]:
+            continue
+        # 判定始终用原始框 i 与原始框 j：union 后的 current 只作输出；
+        # 发射或被吸收的框都标记 consumed，防止后续框再与它配对造成重复合并
+        current = replace(boxes[i])
+        for j in range(i + 1, len(boxes)):
+            if consumed[j]:
+                continue
+            if _is_wrap_pair(boxes[i], boxes[j], chars):
+                current = current.union(boxes[j])
+                consumed[j] = True
+        consumed[i] = True
+        result.append(current)
+    return result
+
+
+def _is_wrap_pair(a: BoundingBox, b: BoundingBox, chars: list[ExtractedChar]) -> bool:
+    """判断 b 是否是 a 的跨行延续（换行签名：上行条纹为行尾、下行条纹为行首）。
+
+    上下关系按 min_y 归一，输入顺序无关；垂直阈值沿用规则 3 的行距容差
+    （间隙 ≤ 1.5×较小框高），行尾/行首容差为半个较小框高（可吸收行尾空格）。
+    """
+    if a.highlight != b.highlight:
+        return False
+    upper, lower = (a, b) if a.min_y <= b.min_y else (b, a)
+    # 必须严格换行到下一行（同一行内的左右分块不归换行签名管）
+    if lower.min_y <= upper.min_y:
+        return False
+    min_h = min(upper.height(), lower.height())
+    gap_y = lower.min_y - upper.max_y
+    if gap_y > min_h * 3 // 2:
+        return False
+    tol = min_h / 2.0
+
+    def in_band(c: ExtractedChar, box: BoundingBox) -> bool:
+        # 行带判定要求重叠 ≥ 字高一半：相邻行条纹常在边界相触（1px 重叠），
+        # 不收紧会把下一行的字符误算进上一行
+        overlap = min(c.max_y, box.max_y) - max(c.min_y, box.min_y)
+        return overlap > 0.0 and overlap >= (c.max_y - c.min_y) * 0.5
+
+    # 行尾：与上行条纹同行的字符中，没有谁整个落在条纹右侧（超出容差）
+    upper_right = upper.max_x + tol
+    if any(in_band(c, upper) and c.min_x > upper_right for c in chars):
+        return False
+
+    # 行首：与下行条纹同行的字符中，没有谁整个落在条纹左侧（超出容差）
+    lower_left = lower.min_x - tol
+    return not any(in_band(c, lower) and c.max_x < lower_left for c in chars)
+
+
 def erase_highlight_boxes(img: Image.Image | np.ndarray, boxes: list[BoundingBox]) -> None:
     """在图像上将高亮矩形区域及残留高亮像素抹白为纯白 #FFFFFF（就地修改）。
 
@@ -261,6 +341,61 @@ def erase_highlight_boxes(img: Image.Image | np.ndarray, boxes: list[BoundingBox
     # 整页残留高亮像素也抹白（消除边缘溢色）
     residual = _highlight_mask(arr)
     arr[residual] = 255
+
+
+def erase_char_boxes(
+    arr: np.ndarray,
+    chars: list[ExtractedChar],
+    idxs: Sequence[int],
+    pad: int = 2,
+) -> None:
+    """按字符包围盒擦白（glyph 级擦除：只清字形矩形，保留穿过区域的表格线）。
+
+    arr 为 numpy uint8 HxWx3（就地切片赋值 255）。整框擦白会把表格线一起抹掉，
+    故此路径只在单元格内逐字符擦除；pad 用于吃掉文字抗锯齿边缘。
+    """
+    height, width = arr.shape[:2]
+    for i in idxs:
+        if not 0 <= i < len(chars):
+            continue  # 字符下标越界（调用方数据不一致）：跳过，不影响其余字
+        c = chars[i]
+        x0 = max(math.floor(c.min_x) - pad, 0)
+        x1 = min(math.ceil(c.max_x) + pad, width - 1)
+        y0 = max(math.floor(c.min_y) - pad, 0)
+        y1 = min(math.ceil(c.max_y) + pad, height - 1)
+        if x1 < x0 or y1 < y0:
+            continue
+        arr[y0:y1 + 1, x0:x1 + 1] = 255
+
+
+def _rect_contains_box(r: RectPx, b: BoundingBox) -> bool:
+    """BoundingBox 是否完整落在 RectPx 内（2px 容差，容纳包围盒贴合误差）。"""
+    return (
+        b.min_x >= r.x - 2
+        and b.max_x <= r.x + r.w + 2
+        and b.min_y >= r.y - 2
+        and b.max_y <= r.y + r.h + 2
+    )
+
+
+def _partition_highlight_boxes(
+    boxes: list[BoundingBox], outer_rects: Sequence[RectPx]
+) -> tuple[list[BoundingBox], list[BoundingBox]]:
+    """按表格外包围矩形把高亮框分流为 (表内, 表外)。
+
+    表内框不整框擦白（保表格线）、不生成区域；其残留高亮像素由
+    erase_highlight_boxes 内的整页像素过滤步骤一并清除。
+    判定用「框完整落在表内」（2px 容差）而非相交：表格线就在高亮框边界上，
+    相交判定会把紧贴表格的高亮整框擦白，连带抹掉那一条表格线。
+    """
+    in_table: list[BoundingBox] = []
+    normal: list[BoundingBox] = []
+    for b in boxes:
+        if any(_rect_contains_box(r, b) for r in outer_rects):
+            in_table.append(b)
+        else:
+            normal.append(b)
+    return in_table, normal
 
 
 # ---------------------------------------------------------------------------
@@ -626,8 +761,16 @@ def extract_pdf_page_tags(
     img_width: int,
     img_height: int,
     img: np.ndarray,
+    exclude_rects: Sequence[RectPx] = (),
 ) -> list[TextRegion]:
-    """从页面字符流提取 ``{{...}}`` / ``【...】`` 标签区域，并在图像上就地抹白标签文字。"""
+    """从页面字符流提取 ``{{...}}`` / ``【...】`` 标签区域，并在图像上就地抹白标签文字。
+
+    exclude_rects 为表格单元格矩形：与任一矩形**相交**的标签不生成独立区域
+    （由单元格区域接管，避免重复），但**仍然擦除**标签框——单元格路径只擦除
+    命中的正文汉字，``{{``/``}}``/前缀等模板字符会残留在底图上。
+    判定用重叠而非中心包含：标签框比单元格正文包围盒更宽（含前缀字符），
+    中心可能落在单元格矩形之外。擦除必须发生在判定之前，顺序不能变。
+    """
     chars = [c.ch for c in page_chars]
     matches = scan_text_tags(chars)
     scale = dpi / 72.0
@@ -667,6 +810,13 @@ def extract_pdf_page_tags(
 
         font_size = _resolve_font_size_px(tag_chars, scale) if tag_chars else 0
 
+        # 表格单元格内的标签由单元格区域接管：仍擦除标签框（见上），但不生成
+        # 独立区域，避免与单元格区域重复。
+        overlaps_cell = any(
+            x < r.x + r.w and x + w > r.x and y < r.y + r.h and y + h > r.y
+            for r in exclude_rects
+        )
+
         # 清理原图上的标签区域为纯白色（向外扩展 2 像素消除文字抗锯齿）
         pad = 2
         ex0 = max(x - pad, 0)
@@ -674,6 +824,9 @@ def extract_pdf_page_tags(
         ex1 = min(x + w + pad, img_width)
         ey1 = min(y + h + pad, img_height)
         img[ey0:ey1, ex0:ex1] = 255
+
+        if overlaps_cell:
+            continue
 
         regions.append(TextRegion(
             x=x, y=y, w=w, h=h,
@@ -788,16 +941,176 @@ def combine_page_regions(
 
 
 # ---------------------------------------------------------------------------
+# docx 表格单元格区域（对齐 Rust doc_render.rs::process_tables_on_page）
+# ---------------------------------------------------------------------------
+
+# docx 的 w:jc 编号（0 左 / 1 中 / 2 右）→ TextRegion.align 字符串。
+# Rust 版 TextRegion.align 是 i32，Python 版是 "left"/"center"/"right"
+#（engine_fast / GUI / 参数校验都按字符串消费），故在区域生成处一次性换算。
+_JC_TO_ALIGN: dict[int, str] = {0: "left", 1: "center", 2: "right"}
+
+
+@dataclass
+class TablePageResult:
+    """一页的表格处理结果。"""
+
+    regions: list[TextRegion] = field(default_factory=list)
+    # 已生成区域的单元格矩形（供标签区域排重）
+    cell_rects: list[RectPx] = field(default_factory=list)
+    # 每张（有区域的）表的外包围矩形（供高亮框分流）
+    outer_rects: list[RectPx] = field(default_factory=list)
+    # 下一页的流起点（本页已消费元素之后的下标；未定位/未完成的表格
+    # 保持指向自身，下一页重走）
+    next_start_element: int = 0
+
+
+def process_tables_on_page(
+    stream: Sequence[BodyElement],
+    views: Sequence[TableView],
+    chars: list[ExtractedChar],
+    start_element: int,
+    page_num: int,
+    dpi: int,
+    arr: np.ndarray,
+    color_map: dict[str, int],
+    next_role_id: list[int],
+) -> TablePageResult:
+    """处理一页上的所有表格：定位 → 擦字 → 生成单元格 TextRegion。
+
+    start_element 为本页在 body 流中的起点（上一页的 next_start_element）。
+    located_on_page == False 的表整表跳过（不生成区域、不擦除、不推断矩形），
+    但流位置（next_start_element）由 locate 结果决定，与是否输出区域无关。
+    无表格或整表未命中时返回空结果（表格保留印刷底图）。
+
+    color_map / next_role_id 为跨页共享的高亮色 → 角色 ID 映射，与高亮框路径
+    同池（同一颜色在整篇文档中只有一个角色）。
+    """
+    # 延迟导入：docx_tables 反向依赖本模块的 strip_tag_syntax/classify_highlight_color，
+    # 顶层 import 会形成循环；同时也让表格功能的可用性不阻塞基础渲染
+    from .docx_io import CellVMerge
+    from .docx_tables import RectPx, infer_cell_rects, locate_tables_on_page
+
+    scale = dpi / 72.0
+    matches, next_start_element = locate_tables_on_page(
+        stream, views, chars, start_element
+    )
+    result = TablePageResult(next_start_element=next_start_element)
+    img_h, img_w = arr.shape[:2]
+
+    for view in views:
+        match = next((m for m in matches if m.table_index == view.index), None)
+        if match is None:
+            continue
+        # 本页未定位的表（整表在更早/更晚页）：不生成区域、不擦除、不推断矩形
+        if not match.located_on_page:
+            continue
+        # 行主序扁平展开：flat_cells / flat_matches / rects 三者下标一一对应
+        #（均按 view.rows 迭代顺序展开，含续行格占位）
+        flat_cells = [c for row in view.rows for c in row.cells]
+        flat_matches = [cm for row_m in match.row_matches for cm in row_m]
+        rects = infer_cell_rects(view, match, chars)
+        if all(r is None for r in rects):
+            continue  # 整表未命中：保留印刷底图
+
+        # 参与生成区域的单元格：非续行、非灰高亮、非空文本且矩形可得
+        #（区域与排重矩形同源）
+        cells_on_page: list[tuple[int, RectPx]] = []
+        for i, (cell, rect) in enumerate(zip(flat_cells, rects)):
+            if cell.v_merge == CellVMerge.CONTINUE:
+                continue
+            if cell.skip_printed:
+                continue
+            if not cell.text.strip():
+                continue
+            if rect is None:
+                continue
+            cells_on_page.append((i, rect))
+
+        table_regions: list[TextRegion] = []
+        for i, rect in cells_on_page:
+            cell = flat_cells[i]
+            located = flat_matches[i] if i < len(flat_matches) else None
+            # 命中字符：擦除原印刷字（保留表格线）；字号取命中字符校准值
+            font_size = 0
+            if located is not None:
+                erase_char_boxes(arr, chars, located.char_idxs, 2)
+                refs = [chars[k] for k in located.char_idxs if 0 <= k < len(chars)]
+                font_size = _resolve_font_size_px(refs, scale) if refs else 0
+            if font_size <= 0 and cell.sz_half_pt:
+                # 未命中或校准失败：回退 w:sz（半磅）→ 像素
+                font_size = int(round((cell.sz_half_pt / 2.0) * scale))
+            # 区域矩形：命中 bbox 外扩（水平 6 / 竖直 4）；推断矩形已内缩
+            if located is not None:
+                region_rect = RectPx(rect.x - 6, rect.y - 4, rect.w + 12, rect.h + 8)
+            else:
+                region_rect = rect
+            # 钳制到图像内（框可能越出页边）
+            rx = max(region_rect.x, 0)
+            ry = max(region_rect.y, 0)
+            rw = max(min(region_rect.w, img_w - rx), 1)
+            rh = max(min(region_rect.h, img_h - ry), 1)
+            # 角色映射：高亮色走共享 color_map（与高亮框路径同池）
+            if cell.highlight is not None:
+                if cell.highlight not in color_map:
+                    color_map[cell.highlight] = next_role_id[0]
+                    next_role_id[0] += 1
+                role_id = color_map[cell.highlight]
+                highlight = cell.highlight
+            else:
+                role_id, highlight = 0, None
+            table_regions.append(TextRegion(
+                x=rx, y=ry, w=rw, h=rh,
+                text=cell.text,
+                role_id=role_id,
+                highlight=highlight,
+                printed=cell.printed,
+                page=page_num,
+                font_size=font_size,
+                align=_JC_TO_ALIGN.get(cell.align, "left"),
+                margin_left=4,
+                margin_right=4,
+                margin_top=2,
+                margin_bottom=2,
+                table_index=view.index,
+            ))
+
+        if not table_regions:
+            continue
+        # 外包围 = 单元格矩形并集（外扩 4px）；供高亮框「框完整落在表内」分流
+        first_rect = cells_on_page[0][1]
+        x0, y0 = first_rect.x, first_rect.y
+        x1 = first_rect.x + first_rect.w
+        y1 = first_rect.y + first_rect.h
+        for _, rect in cells_on_page[1:]:
+            x0 = min(x0, rect.x)
+            y0 = min(y0, rect.y)
+            x1 = max(x1, rect.x + rect.w)
+            y1 = max(y1, rect.y + rect.h)
+        result.outer_rects.append(RectPx(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8))
+        result.cell_rects.extend(rect for _, rect in cells_on_page)
+        result.regions.extend(table_regions)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 入口：PDF / DOCX -> 逐页 PNG + 自动识别的 TextRegion
 # ---------------------------------------------------------------------------
 
 def pdf_to_images_with_regions(
-    pdf_path: str | Path, out_dir: str | Path, dpi: int = 200, prefix: str | None = None
+    pdf_path: str | Path,
+    out_dir: str | Path,
+    dpi: int = 200,
+    prefix: str | None = None,
+    body_stream: Sequence[BodyElement] | None = None,
 ) -> tuple[list[Path], list[TextRegion]]:
     """把 PDF 逐页栅格化为 PNG，并自动检测标记区域。
 
     返回 (文件路径列表, 识别出的 TextRegion 列表)；页面上被标记的高亮色块
     与占位标签文字会被擦除为纯白，使底图可直接用于打印。
+
+    body_stream 为 docx body 元素流（``docx_io.load_body_stream`` 的产物）：
+    非空时启用表格单元格识别；PDF 直接导入时为空，行为与旧版一致。
     """
     import pypdfium2 as pdfium
 
@@ -815,6 +1128,17 @@ def pdf_to_images_with_regions(
         all_regions: list[TextRegion] = []
         color_map: dict[str, int] = {}
         next_role_id = [2]
+        # body 流的表格视图只依赖文档结构，构建一次供所有页复用
+        stream: list[BodyElement] = list(body_stream or [])
+        views: list[TableView] = []
+        if stream:
+            # 延迟导入：见 process_tables_on_page 的说明（避免循环依赖）
+            from .docx_tables import build_table_views
+
+            views = build_table_views(stream)
+        # 跨页流游标：本页已消费元素之后的下标，供下一页作为流起点
+        #（前页元素不再消耗后页字符，防游标中毒）
+        start_element = 0
 
         for index, page in enumerate(doc):
             image = page.render(scale=scale).to_pil().convert("RGB")
@@ -825,20 +1149,45 @@ def pdf_to_images_with_regions(
             # 1. 提取页面所有字符对象及其包围盒与字号
             page_chars = extract_pdf_page_chars(page, dpi)
 
-            # 2. 从 PDF 文本层提取 {{...}} / 【...】标签区域，并抹除标签文字
+            # 2. 表格：定位 + 擦字 + 生成单元格区域（先于标签/高亮，
+            #    标签排除与高亮分流依赖其矩形）
+            if not views:
+                # 无表格：流位置保持不变（显式传递，避免默认值 0 回退）
+                table_result = TablePageResult(next_start_element=start_element)
+            else:
+                table_result = process_tables_on_page(
+                    stream, views, page_chars, start_element, index + 1, dpi,
+                    arr, color_map, next_role_id,
+                )
+            start_element = table_result.next_start_element
+
+            # 3. {{...}}/【...】标签（表格内标签已被单元格区域接管，不重复生成）
             tag_regions = extract_pdf_page_tags(
-                page_chars, index, dpi, arr.shape[1], arr.shape[0], arr
+                page_chars, index, dpi, arr.shape[1], arr.shape[0], arr,
+                exclude_rects=table_result.cell_rects,
             )
 
-            # 3. 从渲染图像中检测高亮色块，并将其擦除为白色
+            # 4. 高亮色块分区：表内框不整框擦白（保表格线）、不生成区域，
+            #    其残留高亮像素由 erase_highlight_boxes 内的整页像素过滤步骤一并清除。
+            #    先按表格分流再换行合并：表内对角相邻的单元格高亮天然满足
+            #    行尾/行首签名，若先合并会逃逸表格分流、整框擦白时抹掉表格线；
+            #    而两个都不被表格包含的框其并集必不被包含，故对纯表外合并而言
+            #    两种顺序等价。
             highlight_boxes = detect_highlight_boxes(arr)
-            erase_highlight_boxes(arr, highlight_boxes)
+            _in_table, normal_boxes = _partition_highlight_boxes(
+                highlight_boxes, table_result.outer_rects
+            )
+            # 换行签名合并：规则 3 要求水平重叠 ≥40%，「句子从行中开始、下一行
+            # 行首结束」的两行条纹零重叠会被切成上下两块，这里按行尾/行首签名补合
+            normal_boxes = merge_wrap_line_boxes(normal_boxes, page_chars)
+            erase_highlight_boxes(arr, normal_boxes)
 
-            # 4. 合并高亮框与文本标签区域，提取高亮框内部文字和字号
+            # 5. 表外高亮框 → 区域（原逻辑不变），表格区域按行主序排在前面
             page_regions = combine_page_regions_with_role_map(
-                highlight_boxes, tag_regions, page_chars,
+                normal_boxes, tag_regions, page_chars,
                 index + 1, scale, color_map, next_role_id,
             )
+            all_regions.extend(table_result.regions)
             all_regions.extend(page_regions)
 
             path = out_dir / f"{prefix}_{index}.png"
@@ -912,7 +1261,13 @@ def docx_to_pdf(docx_path: str | Path, out_dir: str | Path) -> Path:
 
 
 def _word_com_script(docx_path: Path, pdf_path: Path) -> str:
-    """生成调用 Word COM 另存为 PDF 的 PowerShell 脚本（17 = wdFormatPDF）。"""
+    """生成调用 Word COM 另存为 PDF 的 PowerShell 脚本（17 = wdFormatPDF）。
+
+    退出码显式化：COM 拉起的 Word 在最后一个文档关闭后可能自行退出，此时
+    Quit() 抛 RPC 0x800706BE；且 powershell -Command 下即使异常被 try/catch
+    捕获，退出码仍可能被置 1，覆盖成功的转换。故收尾以 PDF 文件是否存在
+    显式决定退出码（调用方同样校验退出码 + 文件存在，见 docx_to_pdf）。
+    """
     src = str(docx_path).replace("'", "''")
     dst = str(pdf_path).replace("'", "''")
     return (
@@ -924,8 +1279,9 @@ def _word_com_script(docx_path: Path, pdf_path: Path) -> str:
         f"  $doc.SaveAs([ref]'{dst}', [ref]17)\n"
         "  $doc.Close($false)\n"
         "} finally {\n"
-        "  $word.Quit()\n"
+        "  try { $word.Quit() } catch { }\n"
         "}\n"
+        f"if (Test-Path '{dst}') {{ exit 0 }} else {{ exit 1 }}\n"
     )
 
 
@@ -938,8 +1294,17 @@ def document_to_page_images_with_regions(
     if suffix == ".pdf":
         return pdf_to_images_with_regions(path, out_dir, dpi=dpi)
     if suffix == ".docx":
+        # 表格结构解析失败不阻塞导入：退化为纯底图（表格保持印刷）
+        from .docx_io import load_body_stream
+
+        try:
+            body_stream = load_body_stream(path)
+        except Exception:  # noqa: BLE001
+            body_stream = []
         pdf_path = docx_to_pdf(path, out_dir)
-        return pdf_to_images_with_regions(pdf_path, out_dir, dpi=dpi, prefix=path.stem)
+        return pdf_to_images_with_regions(
+            pdf_path, out_dir, dpi=dpi, prefix=path.stem, body_stream=body_stream
+        )
     raise ValueError(f"不支持的文档类型：{path.suffix}（支持 .pdf / .docx）")
 
 

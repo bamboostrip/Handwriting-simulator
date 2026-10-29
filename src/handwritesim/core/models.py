@@ -141,6 +141,11 @@ class TextRegion:
     margin_left: int | None = None
     margin_right: int | None = None
 
+    # ---- 所属表格（docx 表格识别导入用；对齐 Rust models.rs::TextRegion）----
+    # 追加在字段末尾并带默认值：旧预设/旧项目 JSON 无该字段时反序列化为 None
+    # （HandwritingParams.from_dict 用 TextRegion(**r_dict)，缺字段走默认值即可）
+    table_index: int | None = None
+
     def has_overrides(self) -> bool:
         """是否设置了任意一项逐区域覆盖（排版、扰动、错字、颜色、内边距）。"""
         return (
@@ -162,10 +167,15 @@ class TextRegion:
         )
 
     def label(self, index: int) -> str:
-        """区域列表里的一行摘要。"""
+        """区域列表里的一行摘要。
+
+        表格单元格区域前缀 ``表N·`` 标注归属（对齐 Rust ``TextRegion::label``
+        与前端 store.ts 的 regionLabel），普通区域无前缀。
+        """
         style = "打印" if self.printed else "手写"
         page = f" 第{self.page}页" if self.page > 1 else ""
-        return f"{index}. {style}{page} {len(self.text)}字 ({self.x},{self.y} {self.w}×{self.h})"
+        table = f"表{self.table_index}·" if self.table_index is not None else ""
+        return f"{table}{index}. {style}{page} {len(self.text)}字 ({self.x},{self.y} {self.w}×{self.h})"
 
 
 def default_roles() -> list[HandwritingRole]:

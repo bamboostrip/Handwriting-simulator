@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 from docx import Document
@@ -737,3 +739,352 @@ def extract_roles_from_paragraphs(paragraphs: list[Paragraph]) -> list[Handwriti
     for rid in sorted(seen):
         roles.append(HandwritingRole(id=rid, name=seen[rid], printed=(rid == 1)))
     return roles
+
+
+# ---------------------------------------------------------------------------
+# 表格结构解析（对齐 Rust 0.5.0 `docx_io::parse_body_stream`）
+#
+# 与既有 load_paragraphs 系列互不影响：这里按文档顺序产出 body 元素流
+#（w:p → BodyParagraph，w:tbl → ParsedTable），供 docx_tables 做单元格
+# 定位与区域生成。只读结构相关属性（列数 / 跨列 / 纵向合并 / 对齐 / 字号 /
+# 高亮 / 字色），不做标签拆分与样式继承解析（对齐、字号取“直接格式”）。
+# ---------------------------------------------------------------------------
+
+
+class CellVMerge(Enum):
+    """单元格垂直合并状态。"""
+
+    NONE = "none"
+    RESTART = "restart"    # 合并起始格（内容在此格）
+    CONTINUE = "continue"  # 合并续行格（无内容，但占用列）
+
+
+@dataclass
+class CellRun:
+    """单元格内的一个 run（单元格全部段落按序拼接，段间插 text="\n" 的 run）。"""
+
+    text: str
+    highlight: str | None = None                 # w:highlight @w:val 小写名（不含 shd 回退）
+    color: tuple[int, int, int] | None = None    # w:color → RGB 三元组
+    sz_half_pt: int | None = None                # w:sz（半磅）
+
+
+@dataclass
+class ParsedCell:
+    """表格单元格的原始结构（未拆标签；多段落以 "\n" run 分隔）。"""
+
+    runs: list[CellRun] = field(default_factory=list)
+    jc: str | None = None                # 首段 w:jc 直接格式
+    run_sz_half_pt: int | None = None    # 首段首个具 w:sz 的 run（字号回退用）
+    grid_span: int = 1                   # w:gridSpan 跨列数（默认 1）
+    v_merge: CellVMerge = CellVMerge.NONE
+    col_start: int = 0                   # 0 基列号（行内前序单元格宽度累计推算）
+
+
+@dataclass
+class ParsedRow:
+    cells: list[ParsedCell] = field(default_factory=list)
+
+
+@dataclass
+class ParsedTable:
+    """顶层表格结构（未做标签拆分）。"""
+
+    grid_cols: int = 0    # tblGrid 列数（缺 tblGrid 时按首行 gridSpan 总和回填）
+    rows: list[ParsedRow] = field(default_factory=list)
+
+
+@dataclass
+class BodyParagraph:
+    """body 段落（text 为全部 run 拼接的可见文本，供匹配消费）。"""
+
+    text: str = ""
+
+
+# body 元素流：段落与表格按文档顺序交错（供表格识别使用）
+BodyElement = BodyParagraph | ParsedTable
+
+# 灰/浅灰高亮名（对齐 Rust `is_gray_highlight`）：表示“保留印刷底图”，
+# 不映射为手写角色。Word 的不同写法（lightGray、gray-25%/grey-50 等）都要认。
+_GRAY_HIGHLIGHTS = frozenset({
+    "lightgray", "light_gray", "light-gray",
+    "darkgray", "dark_gray", "dark-gray",
+    "gray-25", "gray25", "gray_25",
+    "gray-50", "gray50", "gray_50",
+    "gray", "grey",
+    "lightgrey", "light_grey", "light-grey",
+    "darkgrey", "dark_grey", "dark-grey",
+    "grey-25", "grey25", "grey_25",
+    "grey-50", "grey50", "grey_50",
+})
+
+# 可能包裹 body 段落 / 表格行 / 单元格的结构化标签（内容控件等），需穿透
+_BLOCK_CONTAINERS = frozenset({"sdt", "sdtContent", "customXml"})
+
+# 单元格内不下钻的子树：嵌套表格内容与属性、文本框内容均不得泄漏进外层格
+_CELL_SKIP = frozenset({"tbl", "txbxContent", "tcPr"})
+
+
+def is_gray_highlight(val: str) -> bool:
+    """是否为灰/浅灰高亮（印刷体标记，不映射为手写角色）。"""
+    return (val or "").strip().lower() in _GRAY_HIGHLIGHTS
+
+
+def _w(name: str) -> str:
+    """WordprocessingML 主命名空间下的 Clark 记法标签名（qn("w:p")）。"""
+    return qn(f"w:{name}")
+
+
+def _local(tag: object) -> str:
+    """元素/属性名的 local part（`{ns}p` → `p`）；注释等非字符串返回空串。"""
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _attr_val(el, name: str) -> str | None:
+    """按 local name 读属性值（`w:val` → val），缺省返回 None。"""
+    for key, value in el.attrib.items():
+        if _local(key) == name:
+            return value
+    return None
+
+
+def _parse_hex_color(val: str | None) -> tuple[int, int, int] | None:
+    """解析 6 位十六进制颜色（可带 #；"auto" 与非法值视为无色）。"""
+    if not val:
+        return None
+    text = val.strip()
+    if text.lower() == "auto":
+        return None
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) != 6:
+        return None
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError:
+        return None
+
+
+def _collect_run_text(el, out: list[str]) -> None:
+    """收集 run 内可见文本：w:t 取文本，w:tab → "\\t"，w:br/w:cr → "\\n"。
+
+    文本框（w:txbxContent）内的文字整体跳过：其段落不属于本 run 所在段落，
+    混入会污染段落文本与单元格文本。按 Clark 记法精确匹配 w:t，避免误收
+    绘图内的 a:t 等非 Word 文本节点。
+    """
+    for child in el.iterchildren():
+        tag = child.tag
+        if tag == _w("txbxContent") or tag == _w("rPr"):
+            continue
+        if tag == _w("t"):
+            out.append(child.text or "")
+        elif tag == _w("tab"):
+            out.append("\t")
+        elif tag == _w("br") or tag == _w("cr"):
+            out.append("\n")
+        else:
+            _collect_run_text(child, out)
+
+
+def _iter_para_runs(el):
+    """按文档顺序产出段落内的 w:r（run 可被超链接/域/内容控件包裹）。"""
+    for child in el.iterchildren():
+        tag = child.tag
+        if tag == _w("r"):
+            yield child
+            continue
+        name = _local(tag)
+        if name in ("pPr", "rPr", "txbxContent", "tbl"):
+            continue
+        yield from _iter_para_runs(child)
+
+
+def _parse_run(r) -> CellRun:
+    """解析单个 run 的文本与格式（建立一次 w:rPr 的直接子元素索引）。"""
+    run = CellRun(text="")
+    rpr = r.find(_w("rPr"))
+    if rpr is not None:
+        sz_el = rpr.find(_w("sz"))
+        if sz_el is not None:
+            val = _attr_val(sz_el, "val")
+            if val is not None:
+                try:
+                    run.sz_half_pt = int(val)
+                except ValueError:
+                    pass
+        hl_el = rpr.find(_w("highlight"))
+        if hl_el is not None:
+            val = _attr_val(hl_el, "val")
+            if val is not None:
+                run.highlight = val.lower()
+        color_el = rpr.find(_w("color"))
+        if color_el is not None:
+            run.color = _parse_hex_color(_attr_val(color_el, "val"))
+    parts: list[str] = []
+    _collect_run_text(r, parts)
+    run.text = "".join(parts)
+    return run
+
+
+def _parse_paragraph(para) -> tuple[str | None, int | None, list[CellRun]]:
+    """解析一个 w:p → (首段 w:jc 直接格式, 首个具 w:sz 的 run 半磅, 非空 runs)。
+
+    对齐 Rust：run 文本为空不落 run（flush_pending_run），但 w:sz 在任何
+    run 的 rPr 上出现即记录（空 run 也算，用于字号回退）。
+    """
+    jc: str | None = None
+    ppr = para.find(_w("pPr"))
+    if ppr is not None:
+        jc_el = ppr.find(_w("jc"))
+        if jc_el is not None:
+            jc = _attr_val(jc_el, "val")
+    runs: list[CellRun] = []
+    size: int | None = None
+    for r in _iter_para_runs(para):
+        run = _parse_run(r)
+        if size is None and run.sz_half_pt is not None:
+            size = run.sz_half_pt
+        if run.text:
+            runs.append(run)
+    return jc, size, runs
+
+
+def _paragraph_text(para) -> str:
+    """段落可见文本（供表格定位时消费字符流）。"""
+    parts: list[str] = []
+    for r in _iter_para_runs(para):
+        _collect_run_text(r, parts)
+    return "".join(parts)
+
+
+def _iter_block_children(parent):
+    """按文档顺序产出 body 层的 w:p / w:tbl（穿透内容控件容器）。"""
+    for child in parent.iterchildren():
+        name = _local(child.tag)
+        if name in ("p", "tbl"):
+            yield child
+        elif name in _BLOCK_CONTAINERS:
+            yield from _iter_block_children(child)
+
+
+def _iter_named(parent, name: str):
+    """产出 parent 下指定 local name 的直接子元素（可穿透内容控件容器）。"""
+    for child in parent.iterchildren():
+        local = _local(child.tag)
+        if local == name:
+            yield child
+        elif local in _BLOCK_CONTAINERS:
+            yield from _iter_named(child, name)
+
+
+def _iter_cell_paragraphs(el, depth: int = 0):
+    """按文档顺序产出单元格自身的 w:p（跳过嵌套表格与文本框内容）。"""
+    if depth > 8:  # 防御异常深嵌套（真实文档不会到这层）
+        return
+    for child in el.iterchildren():
+        name = _local(child.tag)
+        if name == "p":
+            yield child
+        elif name in _CELL_SKIP:
+            continue
+        else:
+            yield from _iter_cell_paragraphs(child, depth + 1)
+
+
+def _span_above(rows: list[ParsedRow], col_start: int) -> int | None:
+    """vMerge 续行格未声明 gridSpan 时，从上方覆盖该列的合并格继承跨列数。"""
+    for row in reversed(rows):
+        for cell in row.cells:
+            if cell.col_start <= col_start < cell.col_start + cell.grid_span:
+                return cell.grid_span
+    return None
+
+
+def _parse_cell(tc, col_start: int) -> ParsedCell:
+    """解析单元格：tcPr（gridSpan / vMerge）+ 全部段落 runs + 首段格式。"""
+    cell = ParsedCell(col_start=col_start)
+    tcpr = tc.find(_w("tcPr"))
+    if tcpr is not None:
+        gs_el = tcpr.find(_w("gridSpan"))
+        if gs_el is not None:
+            val = _attr_val(gs_el, "val")
+            if val is not None:
+                try:
+                    cell.grid_span = max(int(val), 1)
+                except ValueError:
+                    pass
+        vm_el = tcpr.find(_w("vMerge"))
+        if vm_el is not None:
+            # 无 w:val（或非 restart）一律视为续行格
+            cell.v_merge = (
+                CellVMerge.RESTART if _attr_val(vm_el, "val") == "restart" else CellVMerge.CONTINUE
+            )
+    for para in _iter_cell_paragraphs(tc):
+        jc, size, runs = _parse_paragraph(para)
+        # 对齐 Rust：格内首个“有内容段”之前的段落都可刷新首段格式
+        if not cell.runs:
+            cell.jc = jc
+            cell.run_sz_half_pt = size
+        if runs:
+            if cell.runs:
+                cell.runs.append(CellRun(text="\n"))  # 多段落分隔
+            cell.runs.extend(runs)
+    return cell
+
+
+def _parse_table(tbl) -> ParsedTable:
+    """解析顶层表格：tblGrid 列数、行/单元格、列号与纵向合并继承。"""
+    table = ParsedTable()
+    # tblGrid/gridCol：只数本表的直接子级（自闭合 <w:gridCol/> 同样是元素，照样计数）；
+    # 嵌套表格的 tblGrid 在更深的层级，不会被这里计入
+    for child in tbl.iterchildren():
+        if _local(child.tag) != "tblGrid":
+            continue
+        for col in child.iterchildren():
+            if _local(col.tag) == "gridCol":
+                table.grid_cols += 1
+    for tr in _iter_named(tbl, "tr"):
+        row = ParsedRow()
+        col_cursor = 0
+        for tc in _iter_named(tr, "tc"):
+            cell = _parse_cell(tc, col_cursor)
+            if cell.v_merge is CellVMerge.CONTINUE and cell.grid_span == 1:
+                span = _span_above(table.rows, cell.col_start)
+                if span is not None:
+                    cell.grid_span = span
+            col_cursor += cell.grid_span
+            row.cells.append(cell)
+        table.rows.append(row)
+    if table.grid_cols == 0 and table.rows:
+        # 缺 tblGrid：按首行 gridSpan 总和回填
+        table.grid_cols = sum(c.grid_span for c in table.rows[0].cells)
+    return table
+
+
+def load_body_stream(path: str | Path) -> list[BodyElement]:
+    """按文档顺序返回 docx body 元素流（w:p → BodyParagraph，w:tbl → ParsedTable）。
+
+    与 ``load_paragraphs`` 独立：只做表格定位所需的结构解析，不做标签拆分、
+    样式继承与字号映射。解析失败抛 ``ValueError``（调用方 doc_render 会
+    try/except 退化为“无表格”渲染，不让表格功能阻塞基础导入）。
+    """
+    path = Path(path)
+    try:
+        doc = Document(str(path))
+        body = doc.element.body
+    except Exception as exc:  # noqa: BLE001 - 统一转成 ValueError 交给调用方退化
+        raise ValueError(f"读取 docx {path} 失败：{exc}") from exc
+    if body is None:  # pragma: no cover - python-docx 正常文档必有 body
+        raise ValueError(f"读取 docx {path} 失败：缺少 body")
+    stream: list[BodyElement] = []
+    try:
+        for el in _iter_block_children(body):
+            if _local(el.tag) == "p":
+                stream.append(BodyParagraph(text=_paragraph_text(el)))
+            else:
+                stream.append(_parse_table(el))
+    except Exception as exc:  # noqa: BLE001 - 同上：结构异常也退化为 ValueError
+        raise ValueError(f"解析 docx {path} 的表格结构失败：{exc}") from exc
+    return stream
