@@ -23,7 +23,6 @@ from .doc_render import ExtractedChar, classify_highlight_color, strip_tag_synta
 from .docx_io import (
     BodyElement,
     BodyParagraph,
-    CellRun,
     CellVMerge,
     ParsedCell,
     ParsedTable,
