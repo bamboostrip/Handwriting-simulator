@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
 from PIL import Image
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtCore import QSettings
+from PyQt6.QtGui import QTextCursor
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
 
 from handwritesim.gui.main_window import MainWindow
 
@@ -29,6 +32,30 @@ def _font() -> str:
 def qapp():
     app = QApplication.instance() or QApplication([])
     return app
+
+
+@pytest.fixture(autouse=True)
+def panel_settings(tmp_path: Path, monkeypatch) -> Path:
+    """把界面偏好的 QSettings 指向临时 INI 文件。
+
+    右栏折叠状态与主题偏好都写 QSettings（组织/应用名与 updater.py 一致），
+    测试必须隔离到临时文件：既不污染开发者真实注册表，默认折叠态也可预期。
+    """
+    import handwritesim.gui.ui as ui_module
+
+    ini = tmp_path / "panel-settings.ini"
+    monkeypatch.setattr(
+        ui_module,
+        "_panel_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+    return ini
+
+
+@pytest.fixture()
+def panel_window(qapp, tmp_path: Path) -> MainWindow:
+    """空主窗口（无区域、无文本；折叠状态取临时 QSettings 默认值）。"""
+    return MainWindow(out_dir=tmp_path / "out")
 
 
 @pytest.fixture()
@@ -656,6 +683,251 @@ def test_import_document_without_regions_no_dialog(
     assert len(highlight_dialogs) == 0
     assert window._doc_pages == [str(page_img)]
     assert window._regions == []
+
+
+# ---------------------------------------------------------------------------
+# 右栏六组折叠重排 + 状态栏主题切换（对齐 Rust 0.5.0 右栏重排）
+# ---------------------------------------------------------------------------
+def test_panel_six_sections_default_state(panel_window: MainWindow) -> None:
+    """六组顺序、默认折叠态与「折叠 = 隐藏但不销毁」的保活行为。"""
+    ui = panel_window._ui
+    expected_collapsed = {
+        "text": False,     # 文本内容默认展开
+        "regions": True,   # 无区域时折叠（regions 非空后自动展开）
+        "roles": True,     # 笔迹角色默认折叠
+        "import": False,   # 导入素材默认展开
+        "sim": True,       # 笔迹仿真与版式默认折叠
+        "preset": True,    # 预设默认折叠
+    }
+    assert list(ui.sections) == ["text", "regions", "roles", "import", "sim", "preset"]
+    # 面板布局顺序 == 六组顺序（预览/导出主按钮行在滚动区外，不进面板布局）
+    layout = ui.panel.layout()
+    assert [layout.itemAt(i).widget() for i in range(6)] == [
+        ui.sections[key] for key in ui.sections
+    ]
+    for key, collapsed in expected_collapsed.items():
+        section = ui.sections[key]
+        assert section.is_collapsed() is collapsed, key
+        assert section.body.isHidden() is collapsed, key
+        assert section.btn_header.property("collapsible") is True, key
+    # 折叠组的控件仍挂在面板内（Qt 只隐藏、不销毁，保住焦点/悬浮态/编辑器状态）
+    for widget in (
+        ui.textEdit,
+        ui.widget_marks,
+        ui.group_regions,
+        ui.group_roles,
+        ui.group_layout,
+        ui.group_perturb,
+        ui.group_miswrite,
+        ui.group_margin,
+        ui.lineEdit_10,
+        ui.combo_preset,
+    ):
+        assert ui.panel.isAncestorOf(widget)
+
+
+def test_collapse_state_persisted_and_restored(
+    panel_window: MainWindow, panel_settings: Path, tmp_path: Path
+) -> None:
+    """折叠态写入 QSettings(panel/collapse)，重建窗口后读回上次状态。"""
+    ui = panel_window._ui
+    ui.sections["sim"].set_collapsed(False)     # 用户展开「笔迹仿真与版式」
+    ui.sections["preset"].btn_header.click()    # 用户点组头展开「预设」
+    assert ui.sections["preset"].is_collapsed() is False
+
+    raw = QSettings(
+        str(panel_settings), QSettings.Format.IniFormat
+    ).value("panel/collapse")
+    assert json.loads(raw) == {
+        "text": False,
+        "regions": True,
+        "roles": True,
+        "import": False,
+        "sim": False,
+        "preset": False,
+    }
+
+    restored = MainWindow(out_dir=tmp_path / "out2")
+    assert restored._ui.sections["sim"].is_collapsed() is False
+    assert restored._ui.sections["preset"].is_collapsed() is False
+    assert restored._ui.sections["text"].is_collapsed() is False
+    assert restored._ui.sections["roles"].is_collapsed() is True
+    restored.close()
+
+
+def test_section_header_counts_track_regions_and_roles(panel_window: MainWindow) -> None:
+    """组头计数随区域 / 角色数量变化；首次出现区域时自动展开②组。"""
+    from handwritesim.core.models import HandwritingRole, TextRegion
+
+    ui = panel_window._ui
+    assert "文字区域（0）" in ui.sections["regions"].header_text()
+    assert "笔迹角色（2）" in ui.sections["roles"].header_text()  # 默认手写 + 打印两个角色
+
+    panel_window._regions = [
+        TextRegion(x=10, y=10, w=100, h=40, text="区域一"),
+        TextRegion(x=20, y=20, w=90, h=30, text="区域二"),
+    ]
+    panel_window._refresh_region_list()
+    assert "文字区域（2）" in ui.sections["regions"].header_text()
+    assert ui.sections["regions"].is_collapsed() is False  # 首次生成区域自动展开
+    assert ui.region_list.count() == 2
+
+    panel_window._roles.append(HandwritingRole(id=4, name="手写角色3"))
+    panel_window._refresh_role_list()
+    assert "笔迹角色（3）" in ui.sections["roles"].header_text()
+
+
+def test_import_group_controls_reachable_and_connected(
+    panel_window: MainWindow, monkeypatch
+) -> None:
+    """④ 导入素材四项控件可达（默认展开）且信号已连到既有导入逻辑。"""
+    ui = panel_window._ui
+    body = ui.sections["import"].body
+    for control in (
+        ui.lineEdit_14,   # 文档底图路径
+        ui.pushButton_8,  # 导入打印底图
+        ui.lineEdit_2,    # 背景图片路径
+        ui.pushButton_2,  # 选择背景
+        ui.lineEdit,      # 字体路径
+        ui.pushButton,    # 选择字体
+        ui.btn_import_docx,
+    ):
+        assert body.isAncestorOf(control)
+        assert control.isVisibleTo(body)
+    # 「导入 docx」已从 ① 对齐按钮行移入 ④，属性名保持不变
+    assert not ui.sections["text"].body.isAncestorOf(ui.btn_import_docx)
+    assert ui.btn_import_docx.text() == "导入 Word 正文文本 (.docx)"
+
+    # 四个入口均触发既有文件选择 / 导入逻辑
+    titles: list[str] = []
+
+    def fake_get_open(*args, **kwargs):
+        titles.append(str(args[1]))
+        return ("", "")
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", fake_get_open)
+    for control in (ui.btn_import_docx, ui.pushButton_8, ui.pushButton_2, ui.pushButton):
+        control.click()
+    assert titles == ["导入 docx", "导入 PDF / Word 文档", "选择背景", "选择字体"]
+
+
+def test_selection_mark_bar_visibility(panel_window: MainWindow) -> None:
+    """选区角色标记条：无选区隐藏，有选区显示（selectionChanged 驱动）。"""
+    ui = panel_window._ui
+    assert ui.sections["text"].body.isAncestorOf(ui.widget_marks)
+    assert ui.widget_marks.isHidden() is True  # 启动无选区 → 整条隐藏
+
+    ui.textEdit.setPlainText("选区角色标记条测试文字")
+    assert ui.widget_marks.isHidden() is True
+
+    cursor = ui.textEdit.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    ui.textEdit.setTextCursor(cursor)
+    assert ui.widget_marks.isHidden() is False
+    assert ui.btn_mark_print.isEnabled() is True
+
+    cursor.clearSelection()
+    ui.textEdit.setTextCursor(cursor)
+    assert ui.widget_marks.isHidden() is True
+    assert ui.btn_mark_print.isEnabled() is False
+
+
+def test_status_bar_about_and_theme_cycle(
+    panel_window: MainWindow, panel_settings: Path
+) -> None:
+    """状态栏：左侧版本+关于与更新（标题行已移除），右侧主题三态循环并持久化。"""
+    from handwritesim import __version__
+    from handwritesim.gui.ui import (
+        _DARK_QSS,
+        apply_theme,
+        effective_dark,
+        get_theme_preference,
+        is_dark_mode,
+        set_theme_preference,
+    )
+
+    ui = panel_window._ui
+    bar = panel_window.statusBar()
+    # 「关于」已从面板标题行移到状态栏（属性名 btn_about 保留）
+    assert bar.isAncestorOf(ui.btn_about) is True
+    assert ui.panel.isAncestorOf(ui.btn_about) is False
+    assert ui.btn_about.text() == f"v{__version__} · 关于与更新"
+    assert [b for b in ui.panel.findChildren(QPushButton) if "关于" in b.text()] == []
+
+    # 主题按钮三态循环：跟随系统 → 浅色 → 深色 → 跟随系统
+    assert bar.isAncestorOf(ui.btn_theme) is True
+    assert ui.btn_theme.text() == "跟随系统"
+    label_to_pref = {"跟随系统": "auto", "浅色": "light", "深色": "dark"}
+    for label in ("浅色", "深色", "跟随系统"):
+        ui.btn_theme.click()
+        assert ui.btn_theme.text() == label
+        assert get_theme_preference() == label_to_pref[label]
+        if label == "深色":
+            # 循环中立即应用对应主题
+            assert QApplication.instance().styleSheet() == _DARK_QSS
+    # 回到跟随系统：实际生效样式由系统判定决定
+    assert effective_dark() == is_dark_mode()
+    stored = QSettings(
+        str(panel_settings), QSettings.Format.IniFormat
+    ).value("theme/preference")
+    assert stored == "auto"
+
+    # 手动偏好优先于系统判定
+    set_theme_preference("dark")
+    assert effective_dark() is True
+    set_theme_preference("light")
+    assert effective_dark() is False
+
+    # 还原：跟随系统 + 浅色 QSS，避免影响后续用例
+    set_theme_preference("auto")
+    apply_theme(QApplication.instance(), dark=False)
+
+
+def test_status_bar_about_button_opens_dialog(panel_window: MainWindow, monkeypatch) -> None:
+    """状态栏「v{版本} · 关于与更新」沿用既有 _show_about 逻辑（打开关于对话框）。"""
+    from handwritesim.gui import main_window as mw_module
+
+    opened: list[object] = []
+
+    class _FakeAboutDialog:
+        def __init__(self, parent=None) -> None:
+            opened.append(parent)
+
+        def exec(self) -> int:
+            return 0
+
+    monkeypatch.setattr(mw_module, "AboutDialog", _FakeAboutDialog)
+    panel_window._ui.btn_about.click()
+    assert opened == [panel_window]
+
+
+def test_collapsible_section_api(panel_window: MainWindow) -> None:
+    """CollapsibleSection：标题计数、切换、回调与内容保活。"""
+    from PyQt6.QtWidgets import QLabel
+
+    from handwritesim.gui.collapsible import CollapsibleSection
+
+    callbacks: list[bool] = []
+    section = CollapsibleSection("测试组", panel_window._ui.panel, key="test")
+    label = QLabel("内容", section.body)
+    section.content_layout.addWidget(label)
+    section.set_collapse_callback(callbacks.append)
+
+    assert section.is_collapsed() is False
+    assert section.header_text() == "▼ 测试组"
+    section.set_count(3)
+    assert "测试组（3）" in section.header_text()
+
+    section.toggle()
+    assert section.is_collapsed() is True
+    assert callbacks == [True]
+    assert section.body.isHidden() is True
+    assert section.body.isAncestorOf(label)  # 折叠不销毁内容控件
+
+    section.set_collapsed(False)
+    assert callbacks == [True, False]
+    assert section.body.isHidden() is False
+    assert section.header_text() == "▼ 测试组（3）"
 
 
 

@@ -2,16 +2,38 @@
 
 所有界面文字均为真实 QLabel，窗口可自由缩放，控件随布局自适应，
 任何尺寸下都保持可读。控件属性名与旧版保持一致，main_window 可无缝复用。
+
+右栏按使用阶段分为 6 个可折叠分组（对齐 Rust 0.5.0 右栏重排）：
+① 文本内容 ② 文字区域 ③ 笔迹角色 ④ 导入素材 ⑤ 笔迹仿真与版式 ⑥ 预设；
+折叠状态与主题偏好写入 QSettings（组织/应用名沿用 updater.py 的约定）。
 """
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from ..core.updater import _SETTINGS_APPLICATION, _SETTINGS_ORGANIZATION
+from .collapsible import CollapsibleSection
 from .resources import resource_path
 
 _ARROW_LIGHT = resource_path("ui", "arrow_down.svg").replace("\\", "/")
 _ARROW_DARK = resource_path("ui", "arrow_down_dark.svg").replace("\\", "/")
+
+# ----------------------------------------------------------------------
+# QSettings 键：与 updater.py 共用同一组织/应用名，界面偏好集中存放
+# ----------------------------------------------------------------------
+_KEY_THEME_PREFERENCE = "theme/preference"
+_KEY_PANEL_COLLAPSE = "panel/collapse"
+
+# 六组的固定顺序与 QSettings 中的键（JSON，true = 折叠）
+PANEL_GROUPS: tuple[str, ...] = ("text", "regions", "roles", "import", "sim", "preset")
+
+# 主题三态：auto（跟随系统）/ light / dark
+THEME_PREFERENCES: tuple[str, ...] = ("auto", "light", "dark")
+_THEME_LABELS = {"auto": "跟随系统", "light": "浅色", "dark": "深色"}
 
 _LIGHT_QSS = """
 QMainWindow, QDialog, QMessageBox {
@@ -128,6 +150,20 @@ QPushButton[collapsible="true"] {
     font-weight: bold;
     background: #eef5f0;
     border: 1px solid #d3ded6;
+}
+/* 状态栏文字入口（版本 / 关于与更新、主题切换）：链接风格 */
+QPushButton[link="true"] {
+    background: transparent;
+    border: none;
+    padding: 2px 6px;
+    color: #2e7d32;
+}
+QPushButton[link="true"]:hover {
+    color: #1b5e20;
+}
+QPushButton[link="true"]:pressed {
+    background: transparent;
+    color: #1b5e20;
 }
 QGroupBox {
     background: #f4f7f4;
@@ -356,6 +392,20 @@ QPushButton[collapsible="true"] {
     border: 1px solid #35443a;
     color: #8ed271;
 }
+/* 状态栏文字入口（版本 / 关于与更新、主题切换）：链接风格 */
+QPushButton[link="true"] {
+    background: transparent;
+    border: none;
+    padding: 2px 6px;
+    color: #8ed271;
+}
+QPushButton[link="true"]:hover {
+    color: #a7e08f;
+}
+QPushButton[link="true"]:pressed {
+    background: transparent;
+    color: #a7e08f;
+}
 QGroupBox {
     background: #181c19;
     border: 1px solid #303d34;
@@ -466,7 +516,7 @@ QProgressBar::chunk {
 
 
 def is_dark_mode() -> bool:
-    """判断当前系统环境是否处于深色模式。"""
+    """判断当前系统环境是否处于深色模式（只看系统，不看用户偏好）。"""
     try:
         app = QtWidgets.QApplication.instance()
         if app is not None:
@@ -483,10 +533,112 @@ def is_dark_mode() -> bool:
     return False
 
 
+# ----------------------------------------------------------------------
+# 界面偏好：主题三态 + 右栏折叠状态（QSettings 持久化）
+# ----------------------------------------------------------------------
+def _panel_settings() -> QtCore.QSettings:
+    """构造界面偏好的 QSettings。
+
+    组织名 / 应用名沿用 updater.py 的 ``_SETTINGS_ORGANIZATION`` /
+    ``_SETTINGS_APPLICATION``，与更新检查共用同一配置位置。
+    测试可 monkeypatch 本函数，把配置写到临时 INI 文件。
+    """
+    return QtCore.QSettings(_SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION)
+
+
+def get_theme_preference() -> str:
+    """读取主题偏好："auto"（跟随系统）/ "light" / "dark"；非法值退回 auto。"""
+    try:
+        raw = _panel_settings().value(_KEY_THEME_PREFERENCE, "auto")
+    except Exception:  # noqa: BLE001 - 配置后端异常不应阻塞界面
+        return "auto"
+    pref = str(raw or "auto").strip().lower()
+    return pref if pref in THEME_PREFERENCES else "auto"
+
+
+def set_theme_preference(pref: str) -> str:
+    """写入主题偏好并返回规范化后的值（非法值按 auto 处理）。"""
+    normalized = str(pref or "").strip().lower()
+    if normalized not in THEME_PREFERENCES:
+        normalized = "auto"
+    try:
+        settings = _panel_settings()
+        settings.setValue(_KEY_THEME_PREFERENCE, normalized)
+        settings.sync()
+    except Exception:  # noqa: BLE001
+        pass
+    return normalized
+
+
+def cycle_theme_preference() -> str:
+    """按 跟随系统 → 浅色 → 深色 → 跟随系统 循环并持久化，返回新偏好。"""
+    idx = THEME_PREFERENCES.index(get_theme_preference())
+    return set_theme_preference(THEME_PREFERENCES[(idx + 1) % len(THEME_PREFERENCES)])
+
+
+def theme_preference_label(pref: str | None = None) -> str:
+    """主题偏好的中文文案（跟随系统 / 浅色 / 深色）。"""
+    key = pref if pref in _THEME_LABELS else get_theme_preference()
+    return _THEME_LABELS[key]
+
+
+def effective_dark() -> bool:
+    """当前实际生效的深色与否：手动偏好优先，auto 时跟随系统。"""
+    pref = get_theme_preference()
+    if pref == "dark":
+        return True
+    if pref == "light":
+        return False
+    return is_dark_mode()
+
+
+# ----------------------------------------------------------------------
+# 右栏折叠状态：QSettings 键 panel/collapse，JSON，true = 折叠
+# ----------------------------------------------------------------------
+def load_panel_collapse_state() -> dict[str, bool]:
+    """读取六组折叠状态；无记录或内容异常时返回空字典（调用方取默认值）。"""
+    try:
+        raw = _panel_settings().value(_KEY_PANEL_COLLAPSE, "")
+    except Exception:  # noqa: BLE001
+        return {}
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "ignore")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    state: dict[str, bool] = {}
+    for key in PANEL_GROUPS:
+        value = data.get(key)
+        if isinstance(value, bool):
+            state[key] = value
+        elif isinstance(value, (int, float)):
+            state[key] = bool(value)
+    return state
+
+
+def save_panel_collapse_state(state: Mapping[str, bool]) -> None:
+    """把六组折叠状态写入 QSettings（JSON；缺省组按展开处理）。"""
+    payload = json.dumps(
+        {key: bool(state.get(key, False)) for key in PANEL_GROUPS},
+        ensure_ascii=False,
+    )
+    try:
+        settings = _panel_settings()
+        settings.setValue(_KEY_PANEL_COLLAPSE, payload)
+        settings.sync()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def get_theme_qss(dark: bool | None = None) -> str:
-    """获取指定或当前系统模式的主题 QSS。"""
+    """获取指定或当前生效模式（含手动偏好）的主题 QSS。"""
     if dark is None:
-        dark = is_dark_mode()
+        dark = effective_dark()
     return _DARK_QSS if dark else _LIGHT_QSS
 
 
@@ -494,9 +646,9 @@ def apply_theme(
     app_or_widget: QtWidgets.QWidget | QtWidgets.QApplication | None = None,
     dark: bool | None = None,
 ) -> None:
-    """应用深色或浅色主题。"""
+    """应用深色或浅色主题；未显式指定时优先用户偏好，其次系统。"""
     if dark is None:
-        dark = is_dark_mode()
+        dark = effective_dark()
     qss = get_theme_qss(dark)
     app = QtWidgets.QApplication.instance()
     if app is not None:
@@ -921,6 +1073,14 @@ class PreviewLabel(QtWidgets.QLabel):
         return pm
 
 
+def _hint_label(parent: QtWidgets.QWidget, text: str) -> QtWidgets.QLabel:
+    """构造一行小字说明（QSS 中 ``QLabel[hint="true"]`` 为次要灰色文字）。"""
+    label = QtWidgets.QLabel(text, parent)
+    label.setWordWrap(True)
+    label.setProperty("hint", True)
+    return label
+
+
 class Ui_Form(object):
     def setupUi(self, Form):
         Form.setObjectName("Form")
@@ -984,22 +1144,34 @@ class Ui_Form(object):
         root.addWidget(right)
         panel = QtWidgets.QWidget(scroll)
         scroll.setWidget(panel)
+        self.panel = panel  # 右栏滚动内容容器（便于定位控件与测试断言）
         v = QtWidgets.QVBoxLayout(panel)
         v.setContentsMargins(2, 2, 6, 2)
         v.setSpacing(8)
 
-        # 待处理文本 + 关于按钮
-        row_text_title = QtWidgets.QHBoxLayout()
-        self.label_text = QtWidgets.QLabel(panel)
-        row_text_title.addWidget(self.label_text)
-        row_text_title.addStretch(1)
-        self.btn_about = QtWidgets.QPushButton("ℹ️ 关于", panel)
-        self.btn_about.setObjectName("btn_about")
-        self.btn_about.setToolTip("查看软件版本、开源仓库及更新")
-        row_text_title.addWidget(self.btn_about)
-        v.addLayout(row_text_title)
+        # ---- 右栏分组：按使用阶段分 6 组折叠（对齐 Rust 0.5.0 右栏重排） ----
+        # 折叠状态读自 QSettings（键 panel/collapse，JSON，true=折叠），首次按默认策略；
+        # ①②③ 折叠时只隐藏内容、不销毁控件，保住编辑器焦点/选区与列表悬浮态。
+        collapse_state = load_panel_collapse_state()
+        self.sections: dict[str, CollapsibleSection] = {}
 
-        # 排版工具按钮
+        def add_section(key: str, title: str, default_collapsed: bool) -> CollapsibleSection:
+            """按固定顺序创建折叠组，并把折叠态变化写回 QSettings。"""
+            section = CollapsibleSection(
+                title,
+                panel,
+                collapsed=collapse_state.get(key, default_collapsed),
+                key=key,
+            )
+            section.set_collapse_callback(self._persist_collapse_state)
+            v.addWidget(section)
+            self.sections[key] = section
+            return section
+
+        # ① 文本内容（默认展开）：对齐/缩进工具行 + 选区角色标记条 + 段落状态 + 编辑器
+        body_text = add_section("text", "文本内容", False).content_layout
+
+        # 排版工具按钮（「导入 docx」已移入 ④ 导入素材，统一导入入口）
         row_tools = QtWidgets.QHBoxLayout()
         self.btn_align_left = QtWidgets.QPushButton(panel)
         self.btn_align_left.setObjectName("btn_align_left")
@@ -1009,39 +1181,53 @@ class Ui_Form(object):
         self.btn_align_right.setObjectName("btn_align_right")
         self.btn_indent = QtWidgets.QPushButton(panel)
         self.btn_indent.setObjectName("btn_indent")
-        self.btn_import_docx = QtWidgets.QPushButton(panel)
-        self.btn_import_docx.setObjectName("btn_import_docx")
         row_tools.addWidget(self.btn_align_left)
         row_tools.addWidget(self.btn_center)
         row_tools.addWidget(self.btn_align_right)
         row_tools.addWidget(self.btn_indent)
-        row_tools.addWidget(self.btn_import_docx)
         row_tools.addStretch(1)
-        v.addLayout(row_tools)
+        body_text.addLayout(row_tools)
 
-        # 标记工具：划选后一键设为打印/角色（背景色预览）
-        row_marks = QtWidgets.QHBoxLayout()
-        self.btn_mark_print = QtWidgets.QPushButton(panel)
+        # 选区角色标记条：仅当编辑器存在非空选区时显示（selectionChanged 驱动，
+        # 见 main_window._update_mark_buttons）；无选区整条隐藏，避免无效点击。
+        self.widget_marks = QtWidgets.QWidget(panel)
+        self.widget_marks.setObjectName("widget_marks")
+        row_marks = QtWidgets.QHBoxLayout(self.widget_marks)
+        row_marks.setContentsMargins(0, 0, 0, 0)
+        row_marks.setSpacing(6)
+        self.btn_mark_print = QtWidgets.QPushButton(self.widget_marks)
         self.btn_mark_print.setObjectName("btn_mark_print")
-        self.btn_mark_role1 = QtWidgets.QPushButton(panel)
+        self.btn_mark_role1 = QtWidgets.QPushButton(self.widget_marks)
         self.btn_mark_role1.setObjectName("btn_mark_role1")
-        self.btn_mark_role2 = QtWidgets.QPushButton(panel)
+        self.btn_mark_role2 = QtWidgets.QPushButton(self.widget_marks)
         self.btn_mark_role2.setObjectName("btn_mark_role2")
-        self.btn_mark_clear = QtWidgets.QPushButton(panel)
+        self.btn_mark_clear = QtWidgets.QPushButton(self.widget_marks)
         self.btn_mark_clear.setObjectName("btn_mark_clear")
         row_marks.addWidget(self.btn_mark_print)
         row_marks.addWidget(self.btn_mark_role1)
         row_marks.addWidget(self.btn_mark_role2)
         row_marks.addWidget(self.btn_mark_clear)
         row_marks.addStretch(1)
-        v.addLayout(row_marks)
+        body_text.addWidget(self.widget_marks)
+        self.widget_marks.setVisible(False)
+
+        # 段落状态提示行（段数 / 字数 / 选区字数，由 main_window 实时刷新）
+        self.label_text = QtWidgets.QLabel(panel)
+        self.label_text.setObjectName("label_text")
+        self.label_text.setWordWrap(True)
+        self.label_text.setProperty("hint", True)
+        body_text.addWidget(self.label_text)
 
         self.textEdit = QtWidgets.QTextEdit(panel)
         self.textEdit.setObjectName("textEdit")
         # 文本输入区适当加大，便于一次录入大量文字
         self.textEdit.setMinimumHeight(120)
         self.textEdit.setMaximumHeight(200)
-        v.addWidget(self.textEdit)
+        body_text.addWidget(self.textEdit)
+
+        # ② 文字区域（N）：区域非空时展开（首次无区域则折叠，生成首个区域后自动展开，
+        # 见 main_window._refresh_region_list）；group_regions 整体搬入，避免双标题
+        body_regions = add_section("regions", "文字区域", True).content_layout
 
         # 框选文字区域（实验特性：手写 / 打印混排）
         self.group_regions = QtWidgets.QGroupBox(panel)
@@ -1065,7 +1251,10 @@ class Ui_Form(object):
         row_region_btns.addWidget(self.btn_region_clear)
         row_region_btns.addStretch(1)
         gr.addLayout(row_region_btns)
-        v.addWidget(self.group_regions)
+        body_regions.addWidget(self.group_regions)
+
+        # ③ 笔迹角色（N，默认折叠）：group_roles 整体搬入
+        body_roles = add_section("roles", "笔迹角色", True).content_layout
 
         # 笔迹角色管理（多角色手写槽位，动态高亮映射）
         self.group_roles = QtWidgets.QGroupBox(panel)
@@ -1095,39 +1284,69 @@ class Ui_Form(object):
         row_role_btns.addWidget(self.btn_role_manage)
         row_role_btns.addStretch(1)
         gro.addLayout(row_role_btns)
-        v.addWidget(self.group_roles)
+        body_roles.addWidget(self.group_roles)
 
-        # 字体 / 背景 文件选择
+        # ④ 导入素材（默认展开）：四个「导入文件」入口统一收拢，各配一句说明
+        body_import = add_section("import", "导入素材", False).content_layout
+
+        # (1) 待处理文本：Word 正文文本导入（原在 ① 对齐按钮行，属性名保持不变）
+        self.btn_import_docx = QtWidgets.QPushButton(panel)
+        self.btn_import_docx.setObjectName("btn_import_docx")
+        body_import.addWidget(self.btn_import_docx)
+        body_import.addWidget(
+            _hint_label(panel, "导入为待处理文本，保留文档中的高亮 / 角色标记")
+        )
+
+        # (2) 文档底图 / (3) 背景图片 / (4) 字体：标签 + 路径框 + 选择按钮 + 一句说明
         grid_file = QtWidgets.QGridLayout()
         grid_file.setColumnStretch(1, 1)
-        self.label_font = QtWidgets.QLabel(panel)
-        grid_file.addWidget(self.label_font, 0, 0)
-        self.lineEdit = QtWidgets.QLineEdit(panel)
-        self.lineEdit.setObjectName("lineEdit")
-        grid_file.addWidget(self.lineEdit, 0, 1)
-        self.pushButton = QtWidgets.QPushButton(panel)
-        self.pushButton.setObjectName("pushButton")
-        grid_file.addWidget(self.pushButton, 0, 2)
-        self.label_bg = QtWidgets.QLabel(panel)
-        grid_file.addWidget(self.label_bg, 1, 0)
-        self.lineEdit_2 = QtWidgets.QLineEdit(panel)
-        self.lineEdit_2.setObjectName("lineEdit_2")
-        grid_file.addWidget(self.lineEdit_2, 1, 1)
-        self.pushButton_2 = QtWidgets.QPushButton(panel)
-        self.pushButton_2.setObjectName("pushButton_2")
-        grid_file.addWidget(self.pushButton_2, 1, 2)
+        grid_file.setHorizontalSpacing(6)
+        grid_file.setVerticalSpacing(4)
         # 文档底图：PDF / Word 打印预览作为多页背景
         self.label_doc = QtWidgets.QLabel(panel)
-        grid_file.addWidget(self.label_doc, 2, 0)
+        grid_file.addWidget(self.label_doc, 0, 0)
         self.lineEdit_14 = QtWidgets.QLineEdit(panel)
         self.lineEdit_14.setObjectName("lineEdit_14")
         self.lineEdit_14.setReadOnly(True)
         self.lineEdit_14.setPlaceholderText("可选：导入 PDF / Word 作为打印底图")
-        grid_file.addWidget(self.lineEdit_14, 2, 1)
+        grid_file.addWidget(self.lineEdit_14, 0, 1)
         self.pushButton_8 = QtWidgets.QPushButton(panel)
         self.pushButton_8.setObjectName("pushButton_8")
-        grid_file.addWidget(self.pushButton_8, 2, 2)
-        v.addLayout(grid_file)
+        grid_file.addWidget(self.pushButton_8, 0, 2)
+        grid_file.addWidget(
+            _hint_label(panel, "逐页作为背景打印底图，可选「识别高亮填空」或「纯底图」"),
+            1, 1, 1, 2,
+        )
+        # 背景图片
+        self.label_bg = QtWidgets.QLabel(panel)
+        grid_file.addWidget(self.label_bg, 2, 0)
+        self.lineEdit_2 = QtWidgets.QLineEdit(panel)
+        self.lineEdit_2.setObjectName("lineEdit_2")
+        grid_file.addWidget(self.lineEdit_2, 2, 1)
+        self.pushButton_2 = QtWidgets.QPushButton(panel)
+        self.pushButton_2.setObjectName("pushButton_2")
+        grid_file.addWidget(self.pushButton_2, 2, 2)
+        grid_file.addWidget(
+            _hint_label(panel, "手写所依托的背景图片（png/jpg/webp/bmp）"),
+            3, 1, 1, 2,
+        )
+        # 字体
+        self.label_font = QtWidgets.QLabel(panel)
+        grid_file.addWidget(self.label_font, 4, 0)
+        self.lineEdit = QtWidgets.QLineEdit(panel)
+        self.lineEdit.setObjectName("lineEdit")
+        grid_file.addWidget(self.lineEdit, 4, 1)
+        self.pushButton = QtWidgets.QPushButton(panel)
+        self.pushButton.setObjectName("pushButton")
+        grid_file.addWidget(self.pushButton, 4, 2)
+        grid_file.addWidget(
+            _hint_label(panel, "手写字体文件（.ttf/.ttc/.otf），留空则使用系统字体"),
+            5, 1, 1, 2,
+        )
+        body_import.addLayout(grid_file)
+
+        # ⑤ 笔迹仿真与版式（默认折叠）：文字颜色 + 排版参数 + 笔画扰动 + 写错字 + 边距
+        body_sim = add_section("sim", "笔迹仿真与版式", True).content_layout
 
         # 文字颜色（#RRGGBB 十六进制）
         row_color = QtWidgets.QHBoxLayout()
@@ -1139,23 +1358,7 @@ class Ui_Form(object):
         self.lineEdit_10.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         row_color.addWidget(self.lineEdit_10)
         row_color.addStretch(1)
-        v.addLayout(row_color)
-
-        # 预设：下拉框快捷切换（预设文件夹内）+ 载入/保存按钮（任意位置）
-        row_preset = QtWidgets.QHBoxLayout()
-        self.label_preset = QtWidgets.QLabel(panel)
-        row_preset.addWidget(self.label_preset)
-        self.combo_preset = NoWheelComboBox(panel)
-        self.combo_preset.setObjectName("combo_preset")
-        self.combo_preset.setMinimumWidth(90)
-        row_preset.addWidget(self.combo_preset, 1)
-        self.pushButton_6 = QtWidgets.QPushButton(panel)
-        self.pushButton_6.setObjectName("pushButton_6")
-        row_preset.addWidget(self.pushButton_6)
-        self.pushButton_4 = QtWidgets.QPushButton(panel)
-        self.pushButton_4.setObjectName("pushButton_4")
-        row_preset.addWidget(self.pushButton_4)
-        v.addLayout(row_preset)
+        body_sim.addLayout(row_color)
 
         # 排版参数
         self.group_layout = QtWidgets.QGroupBox(panel)
@@ -1200,7 +1403,7 @@ class Ui_Form(object):
         self.spinBox_3.setObjectName("spinBox_3")
         gl.addWidget(self.spinBox_3, 3, 3)
         gl.setColumnStretch(1, 1)
-        v.addWidget(self.group_layout)
+        body_sim.addWidget(self.group_layout)
 
         # 笔画扰动
         self.group_perturb = QtWidgets.QGroupBox(panel)
@@ -1225,7 +1428,36 @@ class Ui_Form(object):
         self.doubleSpinBox_6.setProperty("value", 0.05)
         gp.addWidget(self.doubleSpinBox_6, 2, 1)
         gp.setColumnStretch(1, 1)
-        v.addWidget(self.group_perturb)
+        body_sim.addWidget(self.group_perturb)
+
+        # 写错字：错字率（0~30%）+ 重写方式 + 涂改方式
+        self.group_miswrite = QtWidgets.QGroupBox(panel)
+        gmw = QtWidgets.QGridLayout(self.group_miswrite)
+        gmw.setSpacing(6)
+        self.label_miswrite_rate = QtWidgets.QLabel(self.group_miswrite)
+        gmw.addWidget(self.label_miswrite_rate, 0, 0)
+        self.miswrite_rate_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.group_miswrite)
+        self.miswrite_rate_slider.setObjectName("miswrite_rate_slider")
+        self.miswrite_rate_slider.setRange(0, 300)  # 0~30%，步进 0.1%
+        self.miswrite_rate_slider.setValue(0)
+        gmw.addWidget(self.miswrite_rate_slider, 0, 1)
+        self.label_miswrite_rate_value = QtWidgets.QLabel(self.group_miswrite)
+        self.label_miswrite_rate_value.setObjectName("label_miswrite_rate_value")
+        self.label_miswrite_rate_value.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.label_miswrite_rate_value.setMinimumWidth(40)
+        gmw.addWidget(self.label_miswrite_rate_value, 0, 2)
+        self.label_miswrite_mode = QtWidgets.QLabel(self.group_miswrite)
+        gmw.addWidget(self.label_miswrite_mode, 1, 0)
+        self.miswrite_mode_combo = QtWidgets.QComboBox(self.group_miswrite)
+        self.miswrite_mode_combo.setObjectName("miswrite_mode_combo")
+        gmw.addWidget(self.miswrite_mode_combo, 1, 1, 1, 2)
+        self.label_miswrite_style = QtWidgets.QLabel(self.group_miswrite)
+        gmw.addWidget(self.label_miswrite_style, 2, 0)
+        self.miswrite_style_combo = QtWidgets.QComboBox(self.group_miswrite)
+        self.miswrite_style_combo.setObjectName("miswrite_style_combo")
+        gmw.addWidget(self.miswrite_style_combo, 2, 1, 1, 2)
+        gmw.setColumnStretch(1, 1)
+        body_sim.addWidget(self.group_miswrite)
 
         # 边距：位置式布局——上/下/左/右输入框环绕中心“边距”，位置即含义
         self.group_margin = QtWidgets.QGroupBox(panel)
@@ -1269,36 +1501,28 @@ class Ui_Form(object):
         row_bounds.addWidget(self.lineEdit_13)
         row_bounds.addStretch(1)
         gm.addLayout(row_bounds, 3, 0, 1, 3)
-        v.addWidget(self.group_margin)
+        body_sim.addWidget(self.group_margin)
 
-        # 写错字：错字率（0~30%）+ 重写方式 + 涂改方式
-        self.group_miswrite = QtWidgets.QGroupBox(panel)
-        gmw = QtWidgets.QGridLayout(self.group_miswrite)
-        gmw.setSpacing(6)
-        self.label_miswrite_rate = QtWidgets.QLabel(self.group_miswrite)
-        gmw.addWidget(self.label_miswrite_rate, 0, 0)
-        self.miswrite_rate_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self.group_miswrite)
-        self.miswrite_rate_slider.setObjectName("miswrite_rate_slider")
-        self.miswrite_rate_slider.setRange(0, 300)  # 0~30%，步进 0.1%
-        self.miswrite_rate_slider.setValue(0)
-        gmw.addWidget(self.miswrite_rate_slider, 0, 1)
-        self.label_miswrite_rate_value = QtWidgets.QLabel(self.group_miswrite)
-        self.label_miswrite_rate_value.setObjectName("label_miswrite_rate_value")
-        self.label_miswrite_rate_value.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.label_miswrite_rate_value.setMinimumWidth(40)
-        gmw.addWidget(self.label_miswrite_rate_value, 0, 2)
-        self.label_miswrite_mode = QtWidgets.QLabel(self.group_miswrite)
-        gmw.addWidget(self.label_miswrite_mode, 1, 0)
-        self.miswrite_mode_combo = QtWidgets.QComboBox(self.group_miswrite)
-        self.miswrite_mode_combo.setObjectName("miswrite_mode_combo")
-        gmw.addWidget(self.miswrite_mode_combo, 1, 1, 1, 2)
-        self.label_miswrite_style = QtWidgets.QLabel(self.group_miswrite)
-        gmw.addWidget(self.label_miswrite_style, 2, 0)
-        self.miswrite_style_combo = QtWidgets.QComboBox(self.group_miswrite)
-        self.miswrite_style_combo.setObjectName("miswrite_style_combo")
-        gmw.addWidget(self.miswrite_style_combo, 2, 1, 1, 2)
-        gmw.setColumnStretch(1, 1)
-        v.addWidget(self.group_miswrite)
+        # 预设：下拉框快捷切换（预设文件夹内）+ 载入/保存按钮（任意位置）
+        # ⑥ 预设（默认折叠）：放在 ⑤ 之后，保持「先内容、后导入、再参数、末预设」的使用顺序
+        body_preset = add_section("preset", "预设", True).content_layout
+        row_preset = QtWidgets.QHBoxLayout()
+        self.label_preset = QtWidgets.QLabel(panel)
+        row_preset.addWidget(self.label_preset)
+        self.combo_preset = NoWheelComboBox(panel)
+        self.combo_preset.setObjectName("combo_preset")
+        self.combo_preset.setMinimumWidth(90)
+        row_preset.addWidget(self.combo_preset, 1)
+        self.pushButton_6 = QtWidgets.QPushButton(panel)
+        self.pushButton_6.setObjectName("pushButton_6")
+        row_preset.addWidget(self.pushButton_6)
+        self.pushButton_4 = QtWidgets.QPushButton(panel)
+        self.pushButton_4.setObjectName("pushButton_4")
+        row_preset.addWidget(self.pushButton_4)
+        body_preset.addLayout(row_preset)
+
+        # 面板底部留伸缩空间：全部折叠时组头紧凑排列，不被均分拉高
+        v.addStretch(1)
 
         # 预览 / 导出
         row_btn = QtWidgets.QHBoxLayout()
@@ -1319,10 +1543,35 @@ class Ui_Form(object):
         row_btn.addWidget(self.pushButton_7, 1)
         right_col.addLayout(row_btn)
 
+        # ---- 底部状态栏按钮（由主窗口挂到 QMainWindow.statusBar()） ----
+        # 标题行的「ℹ️ 关于」已移除：版本 + 关于与更新收进状态栏左侧，
+        # 主题切换（跟随系统 / 浅色 / 深色）放在状态栏右侧；属性名 btn_about 保留。
+        self.btn_about = QtWidgets.QPushButton("关于与更新", Form)
+        self.btn_about.setObjectName("btn_about")
+        self.btn_about.setProperty("link", True)
+        self.btn_about.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_about.setToolTip("查看软件版本、开源仓库及更新")
+
+        self.btn_theme = QtWidgets.QPushButton("跟随系统", Form)
+        self.btn_theme.setObjectName("btn_theme")
+        self.btn_theme.setProperty("link", True)
+        self.btn_theme.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.btn_theme.setToolTip("切换界面主题：跟随系统 → 浅色 → 深色")
+
+
         if not Form.styleSheet() and (QtWidgets.QApplication.instance() is None or not QtWidgets.QApplication.instance().styleSheet()):
             apply_theme(Form)
         self.retranslateUi(Form)
         QtCore.QMetaObject.connectSlotsByName(Form)
+
+    # ------------------------------------------------------------------
+    # 右栏折叠状态持久化
+    # ------------------------------------------------------------------
+    def _persist_collapse_state(self, _collapsed: bool | None = None) -> None:
+        """把六组折叠状态写回 QSettings（键 panel/collapse，JSON，true=折叠）。"""
+        save_panel_collapse_state(
+            {key: section.is_collapsed() for key, section in self.sections.items()}
+        )
 
     def retranslateUi(self, Form):
         _translate = QtCore.QCoreApplication.translate
@@ -1335,11 +1584,9 @@ class Ui_Form(object):
             "勾选后在预览图上按住鼠标拖出矩形，松开后输入该区域的文字\n"
             "（可独立选择手写体 / 打印体，实现混排）"
         )
-        self.group_regions.setTitle("文字区域（手写 / 打印混排）")
+        self.group_regions.setTitle("手写 / 打印混排")
         self.label_regions_hint.setText(
-            "勾选「框选文字」后在左侧预览图拖出矩形生成文字；单击右侧"
-            "列表项可在预览中拖动 / 缩放该区域边框（Esc 或点击空白退出），"
-            "双击列表项可编辑文字。"
+            "「框选文字」后在预览图拖出矩形生成区域；单击列表项可调整边框，双击可编辑文字。"
         )
         self.btn_region_delete.setText("删除选中")
         self.btn_region_clear.setText("清空")
@@ -1349,7 +1596,7 @@ class Ui_Form(object):
         self.btn_center.setText("居中")
         self.btn_align_right.setText("右对齐")
         self.btn_indent.setText("首行缩进")
-        self.btn_import_docx.setText("导入 docx")
+        self.btn_import_docx.setText(_translate("Form", "导入 Word 正文文本 (.docx)"))
         self.textEdit.setPlaceholderText(_translate(
             "Form",
             "请输入文本内容，支持多行。\n",
@@ -1405,7 +1652,7 @@ class Ui_Form(object):
         self.miswrite_mode_combo.addItems(["右上方重写", "后文重写"])
         self.label_miswrite_style.setText(_translate("Form", "涂改方式"))
         self.miswrite_style_combo.addItems(["单横线", "双横线", "斜线", "叉号"])
-        self.group_roles.setTitle(_translate("Form", "笔迹角色管理"))
+        self.group_roles.setTitle(_translate("Form", "字体 / 颜色 / 扰动"))
         self.label_roles_hint.setText(_translate("Form", "动态映射：Word 中首次出现的背景色→手写角色1，次出现→手写角色2… 在此调整各角色字体/颜色/扰动。"))
         self.btn_role_add.setText(_translate("Form", "新增"))
         self.btn_role_edit.setText(_translate("Form", "编辑"))

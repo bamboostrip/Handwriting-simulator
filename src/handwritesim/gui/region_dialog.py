@@ -1,14 +1,17 @@
 """框选文字区域的编辑对话框。
 
 支持多段落独立排版（左/中/右对齐、首行缩进、导入 docx）、基础属性（手写/打印、
-所在页、打印字体、字号）、以及折叠面板「排版与扰动覆盖」（字距/行距/字号及各自
+所在页、字体文件、字号）、以及折叠面板「排版与扰动覆盖」（字距/行距/字号及各自
 随机扰动、笔画扰动、写错字、文字颜色、4向内边距）。
+表格单元格区域（``table_index`` 非 None）额外提供「此字体应用到整张表格」按钮，
+批量写回同表全部单元格的字体与字号（不关闭对话框）。
 主体内容置于滚动区域内并限制最大高度，避免屏幕高度不足时显示不全。
 对齐 Rust 版 RegionDialog.vue 与 RegionTextEditor.vue。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -50,12 +53,17 @@ class RegionDialog(QtWidgets.QDialog):
         margin_bottom: int | None = None,
         margin_left: int | None = None,
         margin_right: int | None = None,
+        table_index: int | None = None,
+        on_apply_table_font: Callable[[str, int], int] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(560)
         self.resize(600, 580)
         self._main_font_size = main_font_size
+        # 表格归属（1 基序号）与整表字体应用回调；非表格区域两者均为 None
+        self._table_index = table_index
+        self._on_apply_table_font = on_apply_table_font
 
         root_layout = QtWidgets.QVBoxLayout(self)
         root_layout.setContentsMargins(12, 12, 12, 12)
@@ -177,8 +185,8 @@ class RegionDialog(QtWidgets.QDialog):
         row_page.addWidget(lbl_page_hint, 1)
         grid_basic.addLayout(row_page, 2, 1)
 
-        # 打印字体
-        self.label_font = QtWidgets.QLabel("打印字体", scroll_content)
+        # 字体文件（手写 / 打印体均可覆盖，留空使用主字体）
+        self.label_font = QtWidgets.QLabel("字体文件", scroll_content)
         grid_basic.addWidget(self.label_font, 3, 0)
         row_font = QtWidgets.QHBoxLayout()
         self.edit_font = QtWidgets.QLineEdit(scroll_content)
@@ -187,6 +195,17 @@ class RegionDialog(QtWidgets.QDialog):
         row_font.addWidget(self.edit_font, 1)
         self.btn_font = QtWidgets.QPushButton("选择", scroll_content)
         row_font.addWidget(self.btn_font)
+        # 仅表格单元格区域显示整表批量应用入口（对齐 Rust RegionDialog.vue）
+        self.btn_apply_table_font: QtWidgets.QPushButton | None = None
+        if table_index is not None:
+            self.btn_apply_table_font = QtWidgets.QPushButton(
+                "此字体应用到整张表格", scroll_content
+            )
+            self.btn_apply_table_font.setToolTip(
+                f"将该字体与字号批量应用到表格 {table_index} 的全部单元格区域"
+                "（不影响文字内容与其他参数）"
+            )
+            row_font.addWidget(self.btn_apply_table_font)
         grid_basic.addLayout(row_font, 3, 1)
 
         # 字号
@@ -416,7 +435,8 @@ class RegionDialog(QtWidgets.QDialog):
         # 信号绑定
         # --------------------------------------------------------------
         self.btn_font.clicked.connect(self._choose_font)
-        self.combo_style.currentIndexChanged.connect(self._update_font_enabled)
+        if self.btn_apply_table_font is not None:
+            self.btn_apply_table_font.clicked.connect(self._apply_current_font_to_table)
         self.combo_role.currentIndexChanged.connect(self._on_role_changed)
         self.combo_style.currentIndexChanged.connect(self._on_style_changed)
         self.btn_align_left.clicked.connect(lambda: self._set_align("left"))
@@ -429,7 +449,7 @@ class RegionDialog(QtWidgets.QDialog):
         self.btn_color_pick.clicked.connect(self._pick_color)
         self.btn_color_reset.clicked.connect(lambda: self.edit_color.clear())
 
-        self._update_font_enabled()
+        self._update_adv_toggle_ui()
         self._update_row_status_and_toolbar()
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
@@ -498,12 +518,6 @@ class RegionDialog(QtWidgets.QDialog):
         self.btn_toggle_adv.setText(f"{arrow} 排版与扰动覆盖 ({tag})")
         self.widget_adv.setVisible(self._adv_expanded)
 
-    def _update_font_enabled(self) -> None:
-        printed = self.combo_style.currentIndex() == 1
-        self.label_font.setEnabled(printed)
-        self.edit_font.setEnabled(printed)
-        self.btn_font.setEnabled(printed)
-
     def _on_role_changed(self) -> None:
         """切换绑定角色：样式（手写/打印）跟随角色打印体标记。"""
         rid = self.combo_role.currentData()
@@ -513,7 +527,6 @@ class RegionDialog(QtWidgets.QDialog):
         self.combo_style.blockSignals(True)
         self.combo_style.setCurrentIndex(1 if role.printed or role.id == 1 else 0)
         self.combo_style.blockSignals(False)
-        self._update_font_enabled()
 
     def _on_style_changed(self) -> None:
         """切换手写/打印样式：默认角色（0/1）联动跟随；显式绑定角色时保留。"""
@@ -530,10 +543,40 @@ class RegionDialog(QtWidgets.QDialog):
 
     def _choose_font(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "选择打印字体", "", "字体 (*.ttf *.ttc *.otf)"
+            self, "选择字体", "", "字体 (*.ttf *.ttc *.otf)"
         )
         if path:
             self.edit_font.setText(path)
+
+    def _apply_current_font_to_table(self) -> None:
+        """把当前字体路径与字号批量应用到整张表格（不关闭对话框）。
+
+        字号 0 表示跟随主设置；回调返回实际应用条数。仅表格单元格区域可见入口，
+        成功 / 失败 / 未配置回调均给出提示。
+        """
+        if self._table_index is None:
+            return
+        if self._on_apply_table_font is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "应用到整张表格",
+                "当前窗口未提供整表字体应用入口，请逐个单元格设置字体。",
+            )
+            return
+        font_path = self.region_font_path
+        font_size = int(self.region_font_size)
+        try:
+            applied = int(self._on_apply_table_font(font_path, font_size))
+        except Exception as exc:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(
+                self, "应用到整张表格", f"应用失败：{exc}"
+            )
+            return
+        QtWidgets.QMessageBox.information(
+            self,
+            "应用到整张表格",
+            f"已将字体应用到表格 {self._table_index} 的 {applied} 个单元格",
+        )
 
     def _pick_color(self) -> None:
         init = QtGui.QColor(self.edit_color.text().strip() or "#000000")
@@ -661,10 +704,10 @@ class RegionDialog(QtWidgets.QDialog):
 
     def _on_accept(self) -> None:
         font_path = self.edit_font.text().strip()
-        if self.combo_style.currentIndex() == 1 and font_path:
-            if not Path(font_path).is_file():
-                QtWidgets.QMessageBox.warning(self, "字体检查", f"文字区域字体文件不存在：{font_path}")
-                return
+        # 字体文件存在性校验对手写 / 打印体一视同仁（对齐 Rust onConfirm）
+        if font_path and not Path(font_path).is_file():
+            QtWidgets.QMessageBox.warning(self, "字体检查", f"文字区域字体文件不存在：{font_path}")
+            return
         color = self.region_color
         if color:
             try:

@@ -81,3 +81,69 @@ def test_apply_theme_and_render_light(app) -> None:
     pix = win.grab()
     assert not pix.isNull()
     win.close()
+
+
+def test_theme_preference_overrides_system(app, tmp_path, monkeypatch) -> None:
+    """主题三态偏好：持久化、循环顺序，且手动偏好优先于系统判定。"""
+    from PyQt6.QtCore import QSettings
+
+    import handwritesim.gui.ui as ui_module
+    from handwritesim.gui.ui import (
+        cycle_theme_preference,
+        effective_dark,
+        get_theme_preference,
+        is_dark_mode,
+        set_theme_preference,
+        theme_preference_label,
+    )
+
+    # 偏好 QSettings 指向临时 INI，避免污染真实注册表
+    ini = tmp_path / "theme.ini"
+    monkeypatch.setattr(
+        ui_module,
+        "_panel_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+
+    # 系统浅色调色板
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#f0f0f0"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#000000"))
+    app.setPalette(palette)
+
+    assert get_theme_preference() == "auto"
+    assert effective_dark() == is_dark_mode()  # auto = 跟随系统
+    assert theme_preference_label() == "跟随系统"
+    system_dark = is_dark_mode()  # 系统判定基准值（后续只改偏好、不再改调色板）
+
+    # 三态循环：跟随系统 → 浅色 → 深色 → 跟随系统
+    assert cycle_theme_preference() == "light"
+    assert get_theme_preference() == "light"
+    assert effective_dark() is False
+    assert theme_preference_label() == "浅色"
+
+    assert cycle_theme_preference() == "dark"
+    assert effective_dark() is True  # 手动深色优先于系统浅色
+    apply_theme(app)                 # 无参：按偏好套用 QSS
+    assert app.styleSheet() == _DARK_QSS
+    assert theme_preference_label() == "深色"
+
+    assert cycle_theme_preference() == "auto"
+    assert effective_dark() == is_dark_mode()
+    assert theme_preference_label() == "跟随系统"
+
+    # 持久化（set_theme_preference 内已 sync），非法值兜底为 auto
+    stored = QSettings(str(ini), QSettings.Format.IniFormat).value("theme/preference")
+    assert stored == "auto"
+    assert set_theme_preference("未知偏好") == "auto"
+    assert get_theme_preference() == "auto"
+
+    # is_dark_mode() 保持系统判定语义：手动偏好不影响它
+    set_theme_preference("dark")
+    assert is_dark_mode() is system_dark
+    assert effective_dark() is True
+
+    # 还原：跟随系统 + 浅色 QSS，避免影响后续用例
+    set_theme_preference("auto")
+    apply_theme(app, dark=False)

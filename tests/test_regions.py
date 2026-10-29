@@ -5,6 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+# GUI 用例使用 offscreen 平台：无显示环境下也能创建 QApplication。
+# 必须在导入 PyQt6 之前设置（本项目其他 GUI 测试文件同策略）。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -434,3 +438,240 @@ def test_region_model_serialization(tmp_path: Path) -> None:
     assert len(r.paragraphs) == 1
     assert r.paragraphs[0].text == "行1"
 
+
+# ---------------------------------------------------------------------------
+# GUI：表格单元格区域徽标 + 整表字体（对齐 Rust 0.5.0 RegionList/RegionDialog）
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def qapp():
+    """模块级 QApplication（offscreen），GUI 用例共享。"""
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture()
+def panel_settings(tmp_path: Path, monkeypatch):
+    """把右栏折叠态的 QSettings 指向临时 INI，避免污染真实注册表。"""
+    from PyQt6.QtCore import QSettings
+
+    import handwritesim.gui.ui as ui_module
+
+    ini = tmp_path / "panel-settings.ini"
+    monkeypatch.setattr(
+        ui_module,
+        "_panel_settings",
+        lambda: QSettings(str(ini), QSettings.Format.IniFormat),
+    )
+    return ini
+
+
+@pytest.fixture()
+def panel_window(qapp, panel_settings, tmp_path: Path, monkeypatch):
+    """隔离 QSettings 且关闭启动更新检查的空主窗口。"""
+    import handwritesim.gui.main_window as mw_module
+    from handwritesim.gui.main_window import MainWindow
+
+    monkeypatch.setattr(mw_module, "is_auto_check_enabled", lambda: False)
+    win = MainWindow(out_dir=tmp_path / "out")
+    yield win
+    win.close()
+
+
+def test_region_list_table_badge(panel_window) -> None:
+    """表格单元格区域列表项带「表N·」前缀，普通区域无前缀。"""
+    from handwritesim.core.models import TextRegion
+
+    panel_window._regions = [
+        TextRegion(x=10, y=10, w=100, h=40, text="表格单元格", table_index=2),
+        TextRegion(x=10, y=60, w=100, h=40, text="普通区域"),
+    ]
+    panel_window._refresh_region_list()
+
+    lst = panel_window._ui.region_list
+    assert lst.count() == 2
+    assert lst.item(0).text().startswith("表2·")
+    assert lst.item(1).text().startswith("2. ")
+    assert "表" not in lst.item(1).text()
+    # 既有行为保留：组头计数与「首次生成区域自动展开」
+    section = panel_window._ui.sections["regions"]
+    assert "文字区域（2）" in section.header_text()
+    assert section.is_collapsed() is False
+
+
+def test_apply_font_to_table_only_same_table(panel_window, monkeypatch) -> None:
+    """整表字体只写回同 table_index 的区域，返回条数并刷新列表/预览。"""
+    from handwritesim.core.models import TextRegion
+
+    same_table = [
+        TextRegion(x=10, y=10 + i * 30, w=100, h=20, text=f"格{i}", table_index=2)
+        for i in range(3)
+    ]
+    outsider = TextRegion(
+        x=10, y=200, w=100, h=20, text="表外", font_path="old.ttf", font_size=18
+    )
+    panel_window._regions = [*same_table, outsider]
+
+    refresh_calls: list[int] = []
+    original_refresh = panel_window._refresh_region_list
+
+    def spy_refresh() -> None:
+        refresh_calls.append(1)
+        original_refresh()
+
+    monkeypatch.setattr(panel_window, "_refresh_region_list", spy_refresh)
+    panel_window._preview_timer.stop()
+
+    applied = panel_window.apply_font_to_table(2, "table-font.ttf", 28)
+
+    assert applied == 3
+    assert all(r.font_path == "table-font.ttf" and r.font_size == 28 for r in same_table)
+    assert outsider.font_path == "old.ttf"
+    assert outsider.font_size == 18
+    assert refresh_calls == [1]          # 区域列表已刷新
+    assert panel_window._preview_timer.isActive()  # 预览防抖已触发
+
+
+def test_edit_region_passes_table_context(panel_window, monkeypatch) -> None:
+    """双击编辑区域时：表格区域传入 table_index 与整表字体回调，普通区域为 None。"""
+    from PyQt6.QtWidgets import QDialog
+
+    import handwritesim.gui.main_window as mw_module
+    from handwritesim.core.models import TextRegion
+
+    panel_window._regions = [
+        TextRegion(x=10, y=10, w=100, h=40, text="格", table_index=2),
+        TextRegion(x=10, y=60, w=100, h=40, text="普通"),
+    ]
+    panel_window._refresh_region_list()
+
+    captured: list[dict[str, object]] = []
+
+    class _FakeDialog:
+        def __init__(self, parent=None, **kwargs) -> None:
+            captured.append(kwargs)
+
+        def exec(self) -> int:
+            return int(QDialog.DialogCode.Rejected)
+
+    monkeypatch.setattr(mw_module, "RegionDialog", _FakeDialog)
+    panel_window._edit_region(panel_window._ui.region_list.item(0))
+    panel_window._edit_region(panel_window._ui.region_list.item(1))
+
+    assert captured[0]["table_index"] == 2
+    assert callable(captured[0]["on_apply_table_font"])
+    assert captured[1]["table_index"] is None
+    assert captured[1]["on_apply_table_font"] is None
+
+    # 回调把字体参数委托给 apply_font_to_table（此处替换为记录函数）
+    delegated: list[tuple[int, str, int]] = []
+    monkeypatch.setattr(
+        panel_window,
+        "apply_font_to_table",
+        lambda table_index, font_path, font_size: delegated.append(
+            (table_index, font_path, font_size)
+        )
+        or 0,
+    )
+    callback = captured[0]["on_apply_table_font"]
+    callback("new.ttf", 26)
+    assert delegated == [(2, "new.ttf", 26)]
+
+
+def test_region_dialog_font_controls_enabled_for_handwriting(qapp) -> None:
+    """手写体下字体选择也应可用，文案为「字体文件」（不再限打印体）。"""
+    from handwritesim.gui.region_dialog import RegionDialog
+
+    dlg = RegionDialog(printed=False)
+    try:
+        assert dlg.label_font.text() == "字体文件"
+        assert dlg.edit_font.isEnabled() is True
+        assert dlg.btn_font.isEnabled() is True
+        # 非表格区域不显示整表字体入口
+        assert dlg.btn_apply_table_font is None
+    finally:
+        dlg.close()
+
+
+def test_region_dialog_apply_font_to_table_button(qapp, monkeypatch) -> None:
+    """表格区域显示整表字体按钮：点击回调当前字体+字号，且不关闭对话框。"""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from handwritesim.gui.region_dialog import RegionDialog
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda parent, title, text, *args, **kwargs: messages.append(text),
+    )
+
+    applied: list[tuple[str, int]] = []
+
+    def fake_apply(font_path: str, font_size: int) -> int:
+        applied.append((font_path, font_size))
+        return 5
+
+    font_path = r"C:\Windows\Fonts\msyh.ttc"
+    dlg = RegionDialog(
+        font_path=font_path,
+        font_size=30,
+        table_index=3,
+        on_apply_table_font=fake_apply,
+    )
+    try:
+        assert dlg.btn_apply_table_font is not None
+        assert dlg.btn_apply_table_font.text() == "此字体应用到整张表格"
+        dlg.btn_apply_table_font.click()
+        assert applied == [(font_path, 30)]
+        assert messages == ["已将字体应用到表格 3 的 5 个单元格"]
+        assert dlg.result() == 0  # 未 accept/reject：对话框保持打开
+    finally:
+        dlg.close()
+
+
+def test_region_dialog_apply_table_font_without_callback(qapp, monkeypatch) -> None:
+    """未配置整表字体回调时点击按钮给出提示而非静默失败。"""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from handwritesim.gui.region_dialog import RegionDialog
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda parent, title, text, *args, **kwargs: messages.append(text),
+    )
+
+    dlg = RegionDialog(table_index=4)
+    try:
+        assert dlg.btn_apply_table_font is not None
+        dlg.btn_apply_table_font.click()
+        assert messages and "未提供" in messages[0]
+    finally:
+        dlg.close()
+
+
+def test_region_dialog_validates_font_file_for_handwriting(
+    qapp, monkeypatch, tmp_path: Path
+) -> None:
+    """手写体区域的字体文件存在性校验同样生效（原先只在打印体校验）。"""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from handwritesim.gui.region_dialog import RegionDialog
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda parent, title, text, *args, **kwargs: warnings.append(text),
+    )
+
+    dlg = RegionDialog(printed=False, font_path=str(tmp_path / "missing.ttf"))
+    try:
+        dlg.text_edit.setPlainText("内容")
+        dlg._on_accept()
+        assert warnings and "字体文件不存在" in warnings[0]
+        assert dlg.result() == 0  # 校验失败不关闭对话框
+    finally:
+        dlg.close()

@@ -38,7 +38,14 @@ from .about_dialog import AboutDialog, CheckUpdateWorker
 from .region_dialog import RegionDialog
 from .update_dialog import UpdateDialog
 from .workers import RenderWorker
-from .ui import Ui_Form, apply_theme, is_dark_mode
+from .ui import (
+    Ui_Form,
+    apply_theme,
+    cycle_theme_preference,
+    effective_dark,
+    get_theme_preference,
+    theme_preference_label,
+)
 
 
 def _is_under_assets(path: Path) -> bool:
@@ -60,6 +67,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._ui = Ui_Form()
         self._ui.setupUi(self)
+        self._setup_status_bar()
         self._out_dir = Path(out_dir)
         self._worker: RenderWorker | None = None
         # 便携模式：确保 exe 旁 fonts/backgrounds/presets 目录存在
@@ -74,6 +82,8 @@ class MainWindow(QMainWindow):
         # 框选文字区域（原始背景像素坐标）与最近一次预览的降采样比例
         self._regions: list[TextRegion] = []
         self._preview_scale = 1.0
+        # 上一次的区域数量：用于「首次生成区域时自动展开文字区域组」
+        self._region_count_last = 0
         # 多角色笔迹槽位（动态高亮映射）
         self._roles: list[HandwritingRole] = default_roles()
         # 当前正在预览图上拖动/缩放调整的区域行号（None = 非调整态）
@@ -93,6 +103,7 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
         self._refresh_preset_combo()
+        self._refresh_region_list()   # 初始化 ② 组头计数（文字区域（0））
         self._update_page_nav()
 
         # 启动时后台异步检查更新（延迟 1.5 秒，避免阻塞启动）
@@ -103,10 +114,49 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 初始化
     # ------------------------------------------------------------------
+    def _setup_status_bar(self) -> None:
+        """底部状态栏：左侧「v{版本} · 关于与更新」，右侧主题切换（三态循环）。
+
+        对齐 Rust 版 App.vue 的 status-bar：标题行不再放「关于」与主题控件，
+        版本入口与主题切换统一收进状态栏，重复入口去重。
+        """
+        bar = self.statusBar()
+        bar.setObjectName("status_bar")
+        bar.setSizeGripEnabled(False)
+        ui = self._ui
+        # 左侧：版本 + 关于与更新（点击走既有 _show_about 逻辑）
+        ui.btn_about.setText(f"v{__version__} · 关于与更新")
+        ui.btn_about.setToolTip("查看软件版本、开源仓库及更新")
+        bar.addWidget(ui.btn_about)
+        # 中间：运行状态提示（渲染中 / 就绪等）
+        self._status_label = QtWidgets.QLabel("就绪", self)
+        self._status_label.setObjectName("label_status")
+        self._status_label.setProperty("hint", True)
+        bar.addWidget(self._status_label, 1)
+        # 右侧：主题切换（跟随系统 → 浅色 → 深色 → 跟随系统）
+        bar.addPermanentWidget(ui.btn_theme)
+        self._update_theme_button()
+
+    def _update_theme_button(self) -> None:
+        """按当前主题偏好刷新状态栏按钮文案与提示。"""
+        label = theme_preference_label(get_theme_preference())
+        self._ui.btn_theme.setText(label)
+        self._ui.btn_theme.setToolTip(
+            f"当前主题：{label}（点击切换 跟随系统 → 浅色 → 深色）"
+        )
+
+    def _cycle_theme(self) -> None:
+        """状态栏主题按钮：三态循环并立即应用、持久化。"""
+        cycle_theme_preference()
+        apply_theme(self)
+        self._update_theme_button()
+
     def _connect_signals(self) -> None:
         ui = self._ui
-        # 关于与更新
+        # 关于与更新（状态栏左侧版本入口）
         ui.btn_about.clicked.connect(self._show_about)
+        # 主题切换（状态栏右侧，跟随系统 / 浅色 / 深色）
+        ui.btn_theme.clicked.connect(self._cycle_theme)
         ui.pushButton.clicked.connect(self._choose_font)
         ui.pushButton_2.clicked.connect(self._choose_background)
         ui.pushButton_8.clicked.connect(self._import_document)
@@ -159,6 +209,10 @@ class MainWindow(QMainWindow):
         ui.btn_mark_clear.clicked.connect(lambda: self._mark_selection(0))
         ui.textEdit.selectionChanged.connect(self._update_mark_buttons)
         self._update_mark_buttons()
+        # 段落状态提示行：段数 / 字数 / 选区字数实时刷新
+        ui.textEdit.textChanged.connect(self._update_para_status)
+        ui.textEdit.selectionChanged.connect(self._update_para_status)
+        self._update_para_status()
         self._connect_auto_preview()
 
     def _update_miswrite_rate_label(self, value: int) -> None:
@@ -195,6 +249,8 @@ class MainWindow(QMainWindow):
                 btn.setVisible(True)
             else:
                 btn.setVisible(False)
+        # 组头计数：笔迹角色（N）
+        self._ui.sections["roles"].set_count(len(self._roles))
 
     def _role_add(self) -> None:
         nxt = max((r.id for r in self._roles), default=-1) + 1
@@ -293,11 +349,28 @@ class MainWindow(QMainWindow):
         self._preview_timer.start()
 
     def _update_mark_buttons(self) -> None:
+        """有非空选区时显示角色标记条并启用按钮；无选区时整条隐藏。
+
+        标记条按需显示（对齐 Rust 设计文档第 4 节第 5 条）：无选区时
+        整条隐藏而不是置灰，避免占屏与无效点击。
+        """
         has = self._ui.textEdit.textCursor().hasSelection()
         self._ui.btn_mark_print.setEnabled(has)
         self._ui.btn_mark_role1.setEnabled(has)
         self._ui.btn_mark_role2.setEnabled(has)
         self._ui.btn_mark_clear.setEnabled(has)
+        self._ui.widget_marks.setVisible(has)
+
+    def _update_para_status(self) -> None:
+        """刷新 ① 文本内容组的段落状态提示行（段数 / 字数 / 选区字数）。"""
+        editor = self._ui.textEdit
+        blocks = max(1, editor.document().blockCount())
+        chars = len(editor.toPlainText().replace("\n", ""))
+        status = f"待处理文本 · 共 {blocks} 段 · {chars} 字"
+        selected = editor.textCursor().selectedText().replace("\u2029", "").replace("\n", "")
+        if selected:
+            status += f" · 已选 {len(selected)} 字"
+        self._ui.label_text.setText(status)
 
     def _connect_auto_preview(self) -> None:
         """文本或任意参数变化时防抖自动预览（参数不完整时静默跳过）。
@@ -594,14 +667,44 @@ class MainWindow(QMainWindow):
             style = self._region_style_label(region)
             page = f" 第{region.page}页" if region.page > 1 else ""
             tag = " [已自定义]" if region.has_overrides() else ""
+            # 表格单元格区域前缀「表N·」（对齐 TextRegion.label 与 Rust regionLabel）
+            table = f"表{region.table_index}·" if region.table_index is not None else ""
             item = QListWidgetItem(
-                f"{i}. {style}{page} {len(region.text)}字 "
+                f"{table}{i}. {style}{page} {len(region.text)}字 "
                 f"({region.x},{region.y} {region.w}×{region.h}){tag}"
             )
             if region.has_overrides():
                 item.setToolTip("包含独立自定义排版/扰动/颜色/边距覆盖项")
             lst.addItem(item)
         lst.blockSignals(False)
+        # 组头计数：文字区域（N）；首次生成区域时自动展开该组（对齐 Rust 默认策略）。
+        # 自动展开不写 QSettings（notify=False）：导入文档等批量操作不应悄悄改写
+        # 用户手动设置的折叠偏好，只有用户点组头才持久化。
+        section = self._ui.sections["regions"]
+        section.set_count(len(self._regions))
+        if self._regions and self._region_count_last == 0:
+            section.set_collapsed(False, notify=False)
+        self._region_count_last = len(self._regions)
+
+    def apply_font_to_table(
+        self, table_index: int, font_path: str, font_size: int
+    ) -> int:
+        """把字体路径与字号批量写回同一张表格的全部单元格区域。
+
+        对齐 Rust ``store.applyFontToTable``：只改字体与字号，不动文字内容与
+        其他逐区域覆盖项；应用后刷新区域列表并触发预览防抖，返回应用条数。
+        """
+        if table_index is None:  # 防御：None 表示「非表格区域」，不能批量匹配普通区域
+            return 0
+        applied = 0
+        for region in self._regions:
+            if region.table_index == table_index:
+                region.font_path = font_path
+                region.font_size = int(font_size)
+                applied += 1
+        self._refresh_region_list()
+        self._preview_timer.start()
+        return applied
 
     def _preview_scale_now(self) -> float:
         """当前预览位图相对原始背景的缩放比，按两者实际宽度计算。
@@ -761,6 +864,13 @@ class MainWindow(QMainWindow):
             margin_bottom=region.margin_bottom,
             margin_left=region.margin_left,
             margin_right=region.margin_right,
+            # 表格单元格区域：对话框内可直接把当前字体批量应用到整张表格
+            table_index=region.table_index,
+            on_apply_table_font=(
+                (lambda fp, fs: self.apply_font_to_table(region.table_index, fp, fs))
+                if region.table_index is not None
+                else None
+            ),
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1517,6 +1627,7 @@ class MainWindow(QMainWindow):
         self._ui.pushButton_3.setEnabled(not busy)
         self._ui.pushButton_5.setEnabled(not busy)
         self._ui.pushButton_7.setEnabled(not busy)
+        self._status_label.setText("渲染中…" if busy else "就绪")
 
     def _on_preview_ready(self, pages) -> None:
         # 预览全部页已生成，在主线程将 PIL.Image 安全转换为 QPixmap
@@ -1526,6 +1637,8 @@ class MainWindow(QMainWindow):
         ]
         self._preview_index = 0
         self._show_page(0)
+        if self._preview_pages:
+            self._status_label.setText(f"预览完成：共 {len(self._preview_pages)} 页")
 
     def _show_page(self, index: int) -> None:
         """显示指定页并更新翻页状态。"""
@@ -1546,7 +1659,7 @@ class MainWindow(QMainWindow):
         idx = (getattr(self, "_preview_bg_idx", 0) + 1) % len(self._PREVIEW_BG_COLORS)
         self._preview_bg_idx = idx
         color = self._PREVIEW_BG_COLORS[idx]
-        border_color = "#303d34" if is_dark_mode() else "#d3ded6"
+        border_color = "#303d34" if effective_dark() else "#d3ded6"
         self._ui.label_11.setStyleSheet(
             f"PreviewLabel {{ background: {color};"
             f" border: 1px solid {border_color}; border-radius: 6px; }}"
