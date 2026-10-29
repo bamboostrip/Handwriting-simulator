@@ -960,10 +960,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导入失败", str(exc))
             return
         if regions:
+            # 表格单元格区域（table_index 非 None）单独计数：提示文案区分「高亮填空」与「表格单元格」
+            table_cells = sum(1 for r in regions if r.table_index is not None)
+            detail = (
+                f"（其中表格单元格 {table_cells} 个、表外标记 {len(regions) - table_cells} 处）"
+                if table_cells
+                else ""
+            )
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("检测到手写填空标记")
             msg_box.setText(
-                f"检测到文档包含 {len(regions)} 处高亮标记或填空区域。\n\n请选择底图处理方式："
+                f"检测到文档包含 {len(regions)} 处高亮标记、填空区域或表格单元格{detail}。\n\n"
+                "请选择底图处理方式："
             )
             msg_box.setIcon(QMessageBox.Icon.Question)
             btn_extract = msg_box.addButton(
@@ -1013,8 +1021,13 @@ class MainWindow(QMainWindow):
                     self,
                     "导入完成",
                     f"已导入文档底图（共 {len(pages)} 页），\n"
-                    f"自动识别提取了 {len(regions)} 处手写填空区域，\n"
-                    "已在区域列表中生成对应条目并关联笔迹角色。",
+                    f"自动识别提取了 {len(regions)} 处手写填空区域"
+                    + (
+                        f"（含表格单元格 {table_cells} 个）"
+                        if table_cells
+                        else ""
+                    )
+                    + "，\n已在区域列表中生成对应条目并关联笔迹角色。",
                 )
                 self._preview_timer.start()
                 return
